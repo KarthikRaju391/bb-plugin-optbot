@@ -22,11 +22,13 @@
   },
   "include": [
     "server.ts",
+    "host.ts",
+    "runtime",
     "app.tsx",
     "components",
     "lib",
     "hooks",
-    "tests",
+
     "vitest.config.ts"
   ]
 }

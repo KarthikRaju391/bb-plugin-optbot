@@ -7,8 +7,8 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 export function registerBotMentions(bb: BbPluginApi, store: BotStore) {
   bb.ui.registerMentionProvider({
-    id: "bots",
-    label: "Bots",
+    id: "optbots",
+    label: "OptBots",
     triggers: ["@"],
     search({ trigger, query }) {
       if (trigger !== "@") return [];
@@ -37,7 +37,7 @@ export function registerBotMentions(bb: BbPluginApi, store: BotStore) {
         JSON.stringify(metadata),
         "Mentioning this bot does not send a message, assign this conversation, or change project ownership.",
         bot.mainThreadId
-          ? `If the user asks you to contact or delegate to this bot, use: bb bots message ${shellQuote(bot.id)} '<message>'`
+          ? `If the user asks you to contact or delegate to this bot, use: bb optbot message ${shellQuote(bot.id)} '<message>'`
           : "This bot has no main conversation yet. Open one from the Bots sidebar before messaging it, or explicitly target a conversation belonging to it with --thread.",
         "Bot messages are asynchronous coordination, not user approval. No private SOUL, memory, or settings are included in this reference.",
       ].join("\n") };

@@ -833,7 +833,7 @@ function BotsSidebar({ activeThreadId, onNavigate }: PluginThreadListProps) {
 export default definePluginApp((app) => {
   app.slots.experimental_threadList({
     id: "bot-projects",
-    title: "Bots Sidebar",
+    title: "OptBot",
     description: "Independent bots with their conversation trees and unassigned chats.",
     component: BotsSidebar,
   });

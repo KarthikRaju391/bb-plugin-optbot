@@ -1,4 +1,105 @@
-# Bots Sidebar
+# OptBot
+
+OptBot retains the Bots Sidebar UI, bot identities, sections, avatars, project
+roles, native conversations, and coordination. Its `optbot` provider runs each
+bot as an OptChat: a fresh model session for each turn, reading that bot's durable
+conversation tree instead of resuming a provider's growing context.
+
+This is a separate, local plugin derived from
+[tobi/bb-bots-sidebar](https://github.com/tobi/bb-bots-sidebar), revision
+`08d93d3721e297ca2393ed09f1965c94bfcedc74`, implementing the required mechanics of
+[Victor Taelin's OptChat specification](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449).
+It is a BB adaptation of that specification, not the upstream OptMem CLI.
+No original plugin installation or live bot records are changed by building it.
+
+## Conversation runtime
+
+- One canonical append-only conversation log and binary summary tree per stable
+  bot ID, shared across that bot's conversations. Daily JSONL streams live in
+  private `chat/<bot-id>/main/` and `tree/` directories. Writes are fsynced;
+  originals, their permanent IDs, and timestamps are never replaced by summaries.
+- The specification's **byte** constants apply: NODE=512, VIEW=128,000,
+  CAP=30,000 characters. The view budget counts node text, not its address/tag
+  overhead. Short nodes are free verbatim copies. A persistent in-memory/cache
+  view is folded incrementally, joining stored sibling nodes according to the
+  specification's due/age rule; completed parents do not trigger global retiling.
+- An always-on backend compactor uses up to eight concurrent jobs, with no
+  duplicate work and no reads of an unbuilt context prefix. Each node has one
+  five-attempt dialogue, a byte-exact SCALE illustration, and byte-safe feedback.
+  The shortest actual candidate is retained even after five overshoots. Failed
+  jobs are reported once and retried after ten seconds; no fake summary is used.
+- Each master turn reads only a settled view, then starts a fresh provider
+  conversation with constant MASTER/VIEW_DOC/instruction headers, that view, and
+  the complete current input. The tool loop and mid-turn messages continue inside
+  that call; signed/encrypted reasoning is preserved for provider caching but
+  excluded from the conversation log. Completed thoughts can stream to the UI.
+- The master supports OpenAI Responses and Anthropic Messages directly, without
+  a Claude CLI/session dependency. Provider/model IDs are separate from memory;
+  switching the master does not regenerate its history. Compatible endpoints are
+  configurable. Fixed line-aligned view cache marks and automatic end caching
+  follow the reference; request usage is exposed through the adapter callback.
+- `zoom(id,n)` and `date(id)` implement the reference navigation tools. The
+  compatibility `optbot_memory` tool adds paginated literal search and leaf
+  paging. Both are scoped to the caller's bot. User instruction files
+  `AGENTS.md`/`CLAUDE.md` are included unchanged in append mode.
+- Per-bot leases serialize turns across conversations, with heartbeats and
+  stale-lease recovery. Loss of the lease service aborts the active model. A
+  completed model answer is checkpointed before compression, so repairing failed
+  compression does not execute the completed model turn a second time.
+- Failed/interrupted attempts remain in history with uncertainty warnings.
+  This is **not** an exactly-once guarantee for external side effects: a crash
+  after a remote action but before its response is recorded still needs human or
+  service-level reconciliation.
+
+The execution host needs `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for the selected
+master, supplied through its environment or BB's environment configuration.
+Do not paste credentials into chat. The independently configured backend
+compactor uses the plugin's secret `compactorApiKey` setting (or the backend's
+provider environment key), `compactorModel`, and optional `compactorEndpoint`.
+CLI/OAuth logins are not substituted for API credentials. Custom endpoints use
+`OPTBOT_OPENAI_BASE_URL`/`OPTBOT_ANTHROPIC_BASE_URL`; they must support the named
+protocol, use HTTPS (loopback HTTP is permitted), and keep credentials separate
+from their URLs. Other protocol families require an additional model adapter;
+this is not a claim that every existing BB CLI provider has been integrated.
+
+Execute mode requires BB's explicit **Full access** permission; requests are never
+silently escalated. Plan mode omits write/shell/native mutation tools. Local-file
+attachment paths are retained; inline/remote image payloads are rejected rather
+than silently discarded. This is the reference's text-memory runtime, not a new
+multimodal attachment service. Optional subagent/computer-job executors from §9
+are not implemented here; existing sidebar coordination remains unchanged.
+
+## Private memory operations
+
+The operator CLI can import a JSON array of `{i?,kind,text,date?}` entries while
+the bot is idle. Supplied IDs and dates are validated and preserved, not repaired;
+conflicting entries or incomplete imported subtrees fail before writes. For large
+imports, send sequential bounded chunks rather than exceeding shell argument
+limits. A backup JSON object can be supplied to the same import command.
+
+- `bb optbot memory import <bot-id> '<JSON-array-or-backup>'`
+- `bb optbot memory view <bot-id>` — bounded current view; no model call.
+- `bb optbot memory browse <bot-id> > memory.html` — private, escaped HTML with
+  the current view, full ROOT messages, all stored levels, ranges, dates and sizes.
+- `bb optbot memory backup <bot-id> > memory.json` — canonical transcript/tree
+  export. Keep exports private and outside Git; also back up the plugin database
+  for sidebar identities, bindings, leases and answer checkpoints.
+
+Contextual agents can read only their own bot and cannot import history. The
+plugin's Unix socket is the lifetime writer lock; a short OS-held startup mutex
+prevents stale-socket cleanup races. There are no PID-file/expiry writer locks.
+BB reloads share the same process-owned writer/compactor. Invalid JSONL lines are
+reported and skipped, missing final newlines repaired, and unsafe/conflicting IDs
+fail closed. SQLite transcript/node indexes can be reconstructed from the files;
+metadata is not confused with generated Markdown exports. A durable inbox keeps
+received but unconsumed inputs across stop/restart. Long compaction can delay the
+next turn, but completed answers do not wait for background compaction.
+
+Live vendor acceptance and cache-hit counts still require authenticated API
+verification. Local mocked-HTTP tests prove request layout and runtime behavior,
+not actual cache hits, model-summary quality, or successful deployment.
+
+The sidebar implementation and its feature reference follow below.
 
 Bots are identities, not projects or working directories. A bot has a name,
 avatar, operating instructions, memory, and linked projects. Its state stays
@@ -28,7 +129,9 @@ Demo data only: [Sidebar](docs/screenshots/sidebar.png) ·
 
 ## Private state
 
-The plugin's SQLite database is the durable authority. Generated Markdown/JSON
+The plugin's SQLite database is the durable authority for sidebar metadata,
+explicit pins/settings, bindings and turn checkpoints, not transcript/tree text.
+Generated Markdown/JSON
 exports live under the plugin's own BB data directory at `state/<bot-id>/`, with
 private directory/file permissions. They are keyed by stable bot IDs, not names,
 and are not execution workspaces. Agents do not need their physical locations.
@@ -36,7 +139,7 @@ and are not execution workspaces. Agents do not need their physical locations.
 | Logical file | Purpose |
 | --- | --- |
 | `SOUL.md` | Identity and personality; up to 4,096 characters |
-| `MEMORY.md` | Durable facts and preferences; at most 3,000 characters |
+| `MEMORY.md` | Compatibility editor/export for pinned context; at most 3,000 characters, not the conversation memory |
 | `settings.json` | Structured bot preferences; a JSON object up to 16,384 characters |
 
 **Edit bot** is the single editor: **Instructions** contains SOUL.md;
@@ -47,7 +150,7 @@ Export failures do not lose committed state or prevent conversations.
 The working machine can be offline while state is still readable/editable in BB.
 
 Sessions receive fixed tool/storage guidance, a bounded SOUL excerpt, and the full
-current memory (up to 3,000 characters). There is no per-bot AGENTS instruction
+current pinned context (up to 3,000 characters), independently of the transcript tree. There is no per-bot AGENTS instruction
 layer. Old bot AGENTS text remains archived in private storage and is not injected,
 editable, or newly exported. Existing oversized memories remain readable without
 truncating stored data; condense them before writing memory again. Existing provider sessions pick up changed system
@@ -95,8 +198,10 @@ in BB; a bot still needs no project or special working directory.
 
 ## State tools
 
-- `bot_read_state({ target })` reads identity, memory, settings, or project roles.
-- `bot_update_state({ target, action, ... })` is the durable-write gateway.
+- `optbot_read_state({ target })` reads identity, pinned context, settings, or project roles.
+- `optbot_update_state({ target, action, ... })` is the durable-write gateway for those explicit settings, not for conversation history.
+- `optbot_memory({ action: "view" | "search" | "zoom", ... })` reads the current bot's conversation tree. `search` accepts a literal `query` and `after` cursor; `zoom` accepts `start`, `count`, and an optional leaf `offset`.
+- `optbot_chat` is the provider's private turn/lease/compression transport. It is not exposed to the model as a callable tool.
 
 | Target | Action | Inputs / behavior |
 | --- | --- | --- |
@@ -188,22 +293,26 @@ in bot state.
 
 ## Plugin identity
 
-The runtime ID is **`bots-sidebar`**, derived from package **`bb-plugin-bots-sidebar`**.
-Use `bb plugin reload bots-sidebar` for this plugin. The community plugin named
-`bots` is a different plugin; this one does not read its storage automatically.
+The runtime ID is **`optbot`**, derived from package **`bb-plugin-optbot`**.
+Use `bb plugin reload optbot` for this plugin. Provider, sidebar, mentions, CLI,
+and client storage keys are namespaced separately from Bots Sidebar. New bot
+conversation composers default to `optbot`.
 
-The earlier private build used `bots`. Its local migration must preserve the entire
-plugin database, private exports, and legacy KV records while the old plugin is
-stopped. Pending startup tokens must be resolved before switching. Keep a backup,
-retire the old namespace, and install the new ID; do not change bot IDs, main pointers,
-thread bindings, or historical thread origin IDs. Client layout and compose-draft
-keys intentionally remain stable. If a device explicitly pinned the old sidebar,
-select **Bots Sidebar** again in Settings → Sidebar; Automatic needs no change.
+Installing this separate plugin does not automatically import live Bots Sidebar
+records or change existing conversations' providers. A live migration needs a
+consistent backup, a reviewed import preserving bot IDs and bindings, and new
+OptBot conversations while keeping old history. That cross-plugin migration is
+not implemented or performed in this checkout. New conversations started through
+OptBot require the OptBot provider; choosing another harness is rejected instead
+of silently losing fresh-context behavior. Existing non-OptBot conversations are
+not converted by assigning them to a bot.
 
 ## Migration and cleanup
 
-Existing IDs, sections, avatars, linked projects, main pointers, and conversation
-bindings are preserved. Version-2 home state is imported once after verifying its
+The inherited migrations apply only to legacy records already in OptBot's own
+storage namespace, not to the separately installed Bots Sidebar. Existing IDs,
+sections, avatars, linked projects, main pointers, and conversation bindings in
+that namespace are preserved. Version-2 home state is imported once after verifying its
 ownership marker. Missing/offline/corrupt sources fall back to that bot's own cached
 state with a warning; later source changes never overwrite newer private state.
 Version-1 project-backed records are still imported from a one-time snapshot,
@@ -224,19 +333,29 @@ switching storage versions; the prior code checkpoint is
 
 ## Develop
 
-Use BB 0.42 or newer and Node.js 24. No BB-core change is required for this model.
+Use a BB release supporting plugin SDK 0.5.29 and provider bridge grammar 3, and
+Node.js 24 or newer. No BB-core source modification is required.
 
 ```sh
-git clone --branch main https://github.com/tobi/bb-bots-sidebar.git
-cd bb-bots-sidebar
+cd bb-plugin-optbot
 npm ci
 npm run typecheck
-npm test
+NODE_OPTIONS=--no-experimental-webstorage npm test
 bb plugin build
-bb plugin install . --yes
 ```
 
-The source began with BB's standard scaffold, not another sidebar plugin. Avatar
+The Node option prevents Node 25's experimental global localStorage from
+colliding with the jsdom UI harness. The local OptChat functional harness is in
+`.local/`; run it with `NODE_OPTIONS=--no-experimental-webstorage npx vitest run
+--config .local/vitest.config.ts`. It mocks model/network responses and uses
+actual BB test-host routing, native protocol schemas, event assembly and SQLite.
+It does not establish live model quality, authentication or deployment success.
+
+Only after backing up/reviewing live migration and authenticating Claude should
+the operator install with `bb plugin install . --yes` and choose **OptBot** in
+Settings → Sidebar. Do not install as an in-place rename of Bots Sidebar.
+
+This fork retains the upstream sidebar implementation. Avatar
 appearance options are adapted from [bloub](https://github.com/jeremy-prt/bloub).
 See [third-party notices](THIRD_PARTY_NOTICES.md) for its MIT attribution.
 Dependencies are installed independently; no other BB plugin is required.
@@ -244,29 +363,29 @@ Dependencies are installed independently; no other BB plugin is required.
 ### Bot coordination
 
 Type **@** followed by a bot name, role, or ID in a composer. Results appear under
-**Bots**; **@bots** lists the available bots, including ones hidden from the sidebar.
+**OptBots**; **@optbots** lists the available bots, including ones hidden from the sidebar.
 Mentions use stable bot IDs, so duplicate names and later renames do not redirect
 an existing reference. Selecting a bot inserts a mention—not a message or an
 assignment. At send time it supplies only public name/role/ID and messaging guidance,
 never that bot's private SOUL, memory, or settings.
 
-Bot context states the current project relationship: owner, joined member (with the owner's name and ID), or not joined. Personal chats have no work-project role. `bot_read_state({"target":"project"})` refreshes this relationship alongside linked and available projects. Ownership routes new project conversations; it does not grant authority over other agents or the user.
+Bot context states the current project relationship: owner, joined member (with the owner's name and ID), or not joined. Personal chats have no work-project role. `optbot_read_state({"target":"project"})` refreshes this relationship alongside linked and available projects. Ownership routes new project conversations; it does not grant authority over other agents or the user.
 
 ```sh
-bb bots list
-bb bots list --json --limit 50 --offset 0
-bb bots message <bot-id-or-exact-name> "Please review the changes"
-bb bots message <bot-id> "My reply" --thread <sender-conversation-id>
+bb optbot list
+bb optbot list --json --limit 50 --offset 0
+bb optbot message <bot-id-or-exact-name> "Please review the changes"
+bb optbot message <bot-id> "My reply" --thread <sender-conversation-id>
 ```
 
 Messages use BB's native queue: idle conversations start a turn, busy conversations receive the message later. The default destination is the recipient's existing main conversation; `--thread` must belong to that bot. Messages identify the invoking conversation and its bound bot, clearly distinguish agent coordination from user instructions, and include an asynchronous reply command. FYI messages need no acknowledgement. Unbound conversations and external CLI callers are labeled accurately. The CLI does not create conversations or change membership, bindings, permissions, or private state.
 
 Listing exposes public bot metadata only and paginates at 100 bots maximum. Names must match exactly; use IDs for duplicate names. Quote messages (maximum 12,000 characters). Delivery receipts confirm acceptance, not task completion or a reply.
 
-`bb bots list` also shows **STATUS**, **VISIBILITY**, **OWNED PROJECTS**, and
+`bb optbot list` also shows **STATUS**, **VISIBILITY**, **OWNED PROJECTS**, and
 **JOINED PROJECTS** by name. Joined projects are memberships without ownership;
 JSON includes both project IDs and names. The first column is the stable bot ID
-accepted by `bb bots message`. Activity aggregates all non-archived bot conversations,
+accepted by `bb optbot message`. Activity aggregates all non-archived bot conversations,
 including inherited children and hidden conversations: waiting takes precedence over
 working, then error, then idle. Visibility separately reflects the bot's hidden setting.
 

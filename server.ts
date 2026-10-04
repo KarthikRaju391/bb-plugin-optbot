@@ -12,6 +12,8 @@ import { registerBotMentions } from "./lib/bot-mentions";
 import { botProjectContext } from "./lib/project-context";
 import { BOT_GUIDANCE, botInstructions } from "./lib/bot-instructions";
 import { MEMORY_MAX_CHARS, validateMemory } from "./lib/memory-limit";
+import { registerOptChat } from "./lib/optchat-plugin";
+import { memoryCommands } from "./lib/memory-operations";
 export { rpcContract, avatarSchema } from "./contract";
 export type { BotAvatar, BotMetadata, BotSection, ProjectCreateInput } from "./contract";
 
@@ -190,7 +192,7 @@ export default async function plugin(bb: BbPluginApi) {
         // Whole-document replacements must never retry against a newer hash.
         const current = await state.read(store.require(botId), "MEMORY.md");
         validateMemory(change.content);
-        if (current.sha256 !== change.expectedSha256) throw new BotStateConflictError('Memory changed. Read it again with bot_read_state({"target":"memory"}), condense the latest content, then overwrite using its sha256.');
+        if (current.sha256 !== change.expectedSha256) throw new BotStateConflictError('Memory changed. Read it again with optbot_read_state({"target":"memory"}), condense the latest pinned context, then overwrite using its sha256.');
         if (change.content === current.content) return { ...documentView(store.require(botId), "memory", current), changed: false };
         const written = await state.update(botId, "MEMORY.md", change.content, change.expectedSha256);
         return { ...documentView(store.require(botId), "memory", written), changed: true };
@@ -212,13 +214,14 @@ export default async function plugin(bb: BbPluginApi) {
     });
   }
   const contextOwner = (ctx: PluginAgentConfigurationContext) => owner(ctx.thread);
+  const optchat=await registerOptChat(bb, resolveOwner);
   bb.agents.configure((ctx) => {
     const botId = contextOwner(ctx);
     const bot = botId ? store.get(botId) : null;
-    return bot ? { tools: ["bot_read_state", "bot_update_state"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
+    return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
   });
   bb.agents.registerTool({
-    name: "bot_read_state", description: "Read this bot's embedded identity and revision, memory facts, settings, or linked/available projects. Supply only target: identity, memory, settings, or project. State is managed privately by BB and is independent of the current machine or working directory.",
+    name: "optbot_read_state", description: "Read this bot's identity, pinned context, settings, or linked projects. Use optbot_memory for conversation history.",
     instructions: BOT_GUIDANCE,
     parameters: stateReadSchema,
     execute: async (input, ctx) => {
@@ -228,7 +231,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.agents.registerTool({
-    name: "bot_update_state", description: "The durable-write gateway for this bot's private state. Always supply target and action. identity/set updates name, role or SOUL using expectedRevision from bot_read_state. memory/append or forget uses one exact single-line fact. Memory is limited to 3000 characters; if full, read memory, condense it, then use memory/overwrite with content and expectedSha256 from that read. Stale replacements fail; read and merge again. settings/set merges selected values; settings/unset removes selected keys. project/join adds membership; leave removes membership and releases ownership. project/own claims an unowned project and joins it; release keeps membership. One owner receives new project threads by default; explicit bot choices win. Existing conversations never move. Scope is always the current bot. State is stored by BB, not in the working directory; do not create state files in projects.",
+    name: "optbot_update_state", description: "Update identity, pinned context, settings or project membership. Requires target and action. Identity needs a fresh expectedRevision; pinned-context overwrite needs expectedSha256. Conversation history is automatic and append-only; never condense it into pinned context.",
     parameters: stateMutationToolSchema,
     execute: async (change, ctx) => {
       const botId = await resolveOwner(ctx.threadId);
@@ -252,7 +255,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.created", async ({ thread }) => { await routeNewThread(thread, true); });
 
-  registerBotsCli(bb, store, resolveOwner);
+  registerBotsCli(bb, store, resolveOwner, memoryCommands(store,optchat,resolveOwner));
   registerBotMentions(bb, store);
 
   bb.rpc.register(rpcContract, {
@@ -309,12 +312,13 @@ export default async function plugin(bb: BbPluginApi) {
       const next = store.save({ ...latest, mainThreadId: threadId, updatedAt: nextTimestamp(latest.updatedAt) }); publish(); return next;
     }),
     conversation_create: async ({ botId, request, makeMain }) => {
+      if (request.providerId !== "optbot") throw new Error("Choose the OptBot (Claude) provider; other harnesses do not provide fresh per-turn OptChat context.");
       if (request.projectId !== await personalProjectId()) await updateProjectRole(botId, "join", request.projectId);
       return serial(botId, async () => {
         const bot = await state.prepare(botId);
         await validateConversationProject(bot, request.projectId);
         const token = randomUUID(); store.stageStart(token, botId, request.projectId);
-        const thread = await bb.sdk.threads.spawn({ ...request, input: [...request.input, { type: "text", text: `[bb-bot-start:${token}]\nThis conversation belongs to bot ${bot.name}. Its identity and memory are embedded and managed by bot_read_state / bot_update_state, not files in the working directory.`, mentions: [], visibility: "agent-only" }] });
+        const thread = await bb.sdk.threads.spawn({ ...request, input: [...request.input, { type: "text", text: `[bb-bot-start:${token}]\nThis conversation belongs to OptBot ${bot.name}. Its history is recorded automatically; use optbot_memory to navigate it. Identity and pinned context are managed by optbot_read_state / optbot_update_state.`, mentions: [], visibility: "agent-only" }] });
         store.bind(thread.id, botId); store.cancelStart(token);
         if (makeMain || !store.require(botId).mainThreadId) { const latest = store.require(botId); store.save({ ...latest, mainThreadId: thread.id, updatedAt: nextTimestamp(latest.updatedAt) }); }
         publish(); return { threadId: thread.id };

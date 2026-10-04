@@ -35,7 +35,7 @@ export function ConversationDialog({ target, onClose, onCreate }: {
   return <Dialog open onOpenChange={(open) => { if (!open && !submitting.current) onClose(); }}>
     <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl" onOpenAutoFocus={(event) => event.preventDefault()}>
       <DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader>
-      <NewThreadComposer defaultProjectId={projectId} defaultEnvironment={target.environment} layout="document" focusRequest={1} draftKey={conversationDraftKey({ botId: target.bot.id, kind: target.kind, makeMain: target.makeMain, projectId, environment: target.environment })} onSubmit={async (request) => {
+      <NewThreadComposer defaultProviderId="optbot" defaultModel="sonnet" defaultProjectId={projectId} defaultEnvironment={target.environment} layout="document" focusRequest={1} draftKey={conversationDraftKey({ botId: target.bot.id, kind: target.kind, makeMain: target.makeMain, projectId, environment: target.environment })} onSubmit={async (request) => {
         if (submitting.current) throw new Error("A conversation is already being created.");
         submitting.current = true; setPending(true); setError(null);
         try { await onCreate(request); }

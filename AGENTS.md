@@ -1,5 +1,20 @@
 # Independent Bots development
 
+## OptBot fork (supersedes upstream deployment and memory rules below)
+
+This checkout is the separate `optbot` plugin, not the installed Bots Sidebar.
+Never edit, reload, disable, migrate, or import the live `bots-sidebar` plugin
+without explicit user approval. Preserve its sidebar UX in this independent fork.
+Per-bot OptChat logs and summary trees are canonical in private daily JSONL streams
+under `chat/<bot-id>/main/` and `tree/`; SQLite holds indexes and BB metadata.
+The inherited memory field is optional pinned context, not history. Follow the
+exact linked replication spec, including background eight-job compaction,
+incremental never-split views, settled-only model reads, and cache-stable headers.
+Master adapters use OpenAI Responses/Anthropic Messages, not a Claude CLI session.
+New bot conversations must use the `optbot` provider. Tools and CLI are namespaced
+to avoid collisions. Build and test here; do not commit or push unless asked.
+Keep new functional harnesses local. Read README.md for runtime limitations.
+
 Work on `main` in the installed Bots Sidebar source checkout. Confirm its path
 with `bb plugin list` before editing. Do not edit or reload older personal-workspace
 worktrees. Build and reload `bots-sidebar` from this checkout; verify the installed
