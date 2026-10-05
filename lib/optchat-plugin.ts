@@ -81,7 +81,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     composerActions: ["plan"],
     strings: { signInHint: "Use an installed BB provider with its existing authentication.", expiredHint: "Renew the selected BB provider's authentication.", installUrl: "https://getbb.app", brandPrefix: "OptBot ", planModeCopy: "Native worker Plan mode is not yet supported." },
     capabilities: { supportsServiceTier: true, supportsNativeUserQuestion: false, fork: "none", supportsManualCompaction: false, supportsThreadArchive: false, supportsThreadRename: false, permissionModes: ["auto", "accept-edits", "full"], reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max", "ultra"] },
-    models: { fallback: ["bb/codex", "bb/claude-code", "bb/pi", "bb/acp-hermes-agent"].map((id) => ({ id, displayName: `${id} — BB configured default`, description: "BB-managed execution with fresh OptChat context", isDefault: id === "bb/codex", supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Medium" }], defaultReasoningEffort: "medium" })), scope: "workspace" },
+    models: { scope: "workspace" },
   });
   const chatSchema = z.object({
     action: z.enum(["begin", "heartbeat", "checkpoint", "record", "work", "merge", "view", "finish", "settled", "zoom", "date", "input", "enqueue"]),

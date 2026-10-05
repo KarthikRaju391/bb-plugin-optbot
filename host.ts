@@ -125,7 +125,9 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         let native: Awaited<ReturnType<typeof bbCatalog>> = [];
         try { native = await bbCatalog(modelListParamsSchema.parse(req.params).cwd); } catch { /* BB remains the authority; a failed probe is not an authentication fallback. */ }
         const models = native.length ? native : [{ id: "bb/codex", displayName: "BB Codex — configured default", isDefault: true }];
-        io.sendResult(req.id, { models: models.map(model => ({ ...model, model: model.id, description: "BB-managed execution with fresh OptChat context", supportedReasoningEfforts: "supportedReasoningEfforts" in model ? model.supportedReasoningEfforts : [{reasoningEffort:"medium",description:"Medium"}], defaultReasoningEffort:"defaultReasoningEffort" in model ? model.defaultReasoningEffort : "medium" })), selectedOnlyModels: [] });
+        // Choose models in BB's native picker. Wrapped identities remain available
+        // only for resolving a conversation's existing selection, not as a second catalog.
+        io.sendResult(req.id, { models: [], selectedOnlyModels: models.map(model => ({ ...model, model: model.id, description: "BB-managed execution with fresh OptChat context", supportedReasoningEfforts: "supportedReasoningEfforts" in model ? model.supportedReasoningEfforts : [{reasoningEffort:"medium",description:"Medium"}], defaultReasoningEffort:"defaultReasoningEffort" in model ? model.defaultReasoningEffort : "medium" })) });
       } else if (req.method === "thread/start" || req.method === "thread/resume") {
         const params = req.method === "thread/start" ? threadStartParamsSchema.parse(req.params) : threadResumeParamsSchema.parse(req.params);
         if (active.has(params.threadId)) throw new Error("Cannot reconstruct an active OptBot conversation");
