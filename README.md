@@ -33,12 +33,11 @@ No original plugin installation or live bot records are changed by building it.
   the complete current input. The tool loop and mid-turn messages continue inside
   that call; signed/encrypted reasoning is preserved for provider caching but
   excluded from the conversation log. Completed thoughts can stream to the UI.
-- The default master reuses the authenticated Codex runtime on the BB execution
-  machine without an API key. Its native model catalog supplies the picker. OpenAI
-  Responses and Anthropic Messages remain available as explicit API alternatives.
-  Switching models does not regenerate history. API adapters implement the fixed
-  line-aligned cache marks; the native Codex adapter delegates caching and reasoning
-  retention to Codex, whose app-server does not expose those cache controls.
+- BB models execute in fresh **hidden BB worker threads**, using the selected
+  installed provider, its authentication, native tools, and execution environment.
+  OptBot owns the memory view and durable transcript, not a parallel provider
+  transport. Native caching/reasoning retention belongs to the selected provider.
+  OpenAI Responses and Anthropic Messages remain explicit API alternatives.
 - `zoom(id,n)` and `date(id)` implement the reference navigation tools. The
   compatibility `optbot_memory` tool adds paginated literal search and leaf
   paging. Both are scoped to the caller's bot. User instruction files
@@ -54,19 +53,25 @@ No original plugin installation or live bot records are changed by building it.
 
 ### Run without an API key
 
-Choose **BB Codex — configured default (no API key)** (`bb/codex`), or a specific
-`bb/codex/<model>` from the live picker. OptBot starts an ephemeral Codex app-server
-session on the conversation's execution machine using that machine's existing
-Codex login/configuration, just as BB's Codex runtime does. It does not read or copy
-credential files, create helper BB threads, or resume persistent Codex history.
-This requires a Codex version supporting dynamic tools and empty `environments`;
-unsupported runtime requests fail closed rather than bypassing OptBot's tools.
+Choose an installed provider in BB's native conversation composer. OptBot wraps
+that selection as `bb/<provider>/<model>` and runs a fresh hidden BB worker for
+each master turn. The visible conversation remains on the `optbot` orchestration
+provider so selecting another execution provider does not bypass memory.
+Existing `bb/codex` conversations now delegate to BB's installed Codex provider.
+The OptBot model catalog excludes itself to prevent recursive worker selection.
 
-Set **Compactor BB machine ID** to the enrolled machine with that Codex login.
-The default `compactorModel` is also `bb/codex`; background jobs travel through
-the public SDK host-RPC contract, so authentication stays on that machine rather
-than requiring an API credential in the BB backend. The configured machine must
-remain online for large-message compaction. Example operator setup:
+Set **Compactor BB machine ID** to an enrolled machine with the chosen provider.
+The default `compactorModel` is `bb/codex`; any `bb/<provider>/<model>` selection
+uses the same native worker service. Authentication stays with BB. The configured
+machine must remain online for large-message compaction. Example operator setup:
+
+**Safety gate:** automatic native background compaction is paused by default.
+BB's public worker API cannot disable every provider-native tool. Processing
+untrusted historical text with those tools is therefore not a text-only boundary.
+The operator may explicitly enable `allowNativeSummaryTools` after accepting that
+risk, or choose a text-only API summarizer. Without either, long-message
+compaction remains pending and can block the next settled memory view. The
+benign, operator-requested readiness check still works without this opt-in.
 
 ```sh
 bb plugin config optbot set compactorHost <machine-id>
@@ -75,15 +80,17 @@ bb plugin reload optbot
 bb optbot model check
 ```
 
-The no-key adapter currently supports **Codex**, not every BB runtime (Claude
-Code, Pi, ACP/Hermes), and does not integrate BB Account Pooler routing or BB-only
-Codex plugin settings. It reuses the host's Codex login and native configuration.
-Native filesystem, MCP, web and delegation tools are disabled; OptBot's explicit
-memory/workspace tools remain the execution and recording boundary.
+Provider availability, login, account routing and native tools are BB's concern.
+Master workers reuse the visible conversation's environment and requested
+permissions. Their OptBot memory/state tools are scoped to the originating bot;
+internal worker/control tools are not injected into them. Completed worker
+messages and native tool receipts enter canonical history; reasoning does not.
+Workers are hidden and archived on completion/cancellation. They consume BB
+concurrency slots, so the host needs capacity beyond the visible conversation.
 
-`bb optbot model check` executes a small readiness summary through the actual
-configured host-RPC route and returns the model, machine ID, and generated text.
-It does not write bot history or create any BB threads; it consumes a model call.
+`bb optbot model check` executes a small readiness summary through an actual
+hidden BB worker and returns the model, machine ID, and generated text. It does
+not write bot history. It consumes a provider call and archives its worker.
 
 For explicitly selected API models only, the execution host needs
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. The API compactor instead uses the secret
@@ -92,8 +99,11 @@ For explicitly selected API models only, the execution host needs
 `OPTBOT_OPENAI_BASE_URL`/`OPTBOT_ANTHROPIC_BASE_URL`, must support the selected
 protocol and HTTPS (loopback HTTP permitted), and must keep keys out of URLs.
 
-Execute mode requires BB's explicit **Full access** permission; requests are never
-silently escalated. Plan mode omits write/shell/native mutation tools. Local-file
+Native worker permissions are forwarded without escalation. Native Plan mode is
+currently rejected before spawning; approval/question interactions remain on the
+worker's BB timeline rather than being mirrored into the visible conversation.
+Direct API execution still requires explicit **Full access**; its Plan mode
+omits write/shell/native mutation tools. Local-file
 attachment paths are retained; inline/remote image payloads are rejected rather
 than silently discarded. This is the reference's text-memory runtime, not a new
 multimodal attachment service. Optional subagent/computer-job executors from §9
@@ -231,7 +241,7 @@ in BB; a bot still needs no project or special working directory.
 - `optbot_read_state({ target })` reads identity, pinned context, settings, or project roles.
 - `optbot_update_state({ target, action, ... })` is the durable-write gateway for those explicit settings, not for conversation history.
 - `optbot_memory({ action: "view" | "search" | "zoom", ... })` reads the current bot's conversation tree. `search` accepts a literal `query` and `after` cursor; `zoom` accepts `start`, `count`, and an optional leaf `offset`.
-- `optbot_chat` is the provider's private turn/lease/compression transport. It is not exposed to the model as a callable tool.
+- `optbot_chat` and `optbot_worker` are private orchestration transports, not worker-model tools.
 
 | Target | Action | Inputs / behavior |
 | --- | --- | --- |
@@ -326,15 +336,15 @@ in bot state.
 The runtime ID is **`optbot`**, derived from package **`bb-plugin-optbot`**.
 Use `bb plugin reload optbot` for this plugin. Provider, sidebar, mentions, CLI,
 and client storage keys are namespaced separately from Bots Sidebar. New bot
-conversation composers default to `optbot`.
+conversation composers use BB's native provider picker; execution is wrapped by `optbot`.
 
 Installing this separate plugin does not automatically import live Bots Sidebar
 records or change existing conversations' providers. A live migration needs a
 consistent backup, a reviewed import preserving bot IDs and bindings, and new
 OptBot conversations while keeping old history. That cross-plugin migration is
 not implemented or performed in this checkout. New conversations started through
-OptBot require the OptBot provider; choosing another harness is rejected instead
-of silently losing fresh-context behavior. Existing non-OptBot conversations are
+OptBot retain the selected installed execution provider inside the OptBot wrapper.
+Existing non-OptBot conversations are
 not converted by assigning them to a bot.
 
 ## Migration and cleanup
@@ -382,7 +392,7 @@ actual BB test-host routing, native protocol schemas, event assembly and SQLite.
 It does not establish live model quality, authentication or deployment success.
 
 Install with `bb plugin install . --yes` and choose **OptBot** in Settings → Sidebar.
-For the default no-key path, use an execution machine already signed into Codex
+For the default no-key path, use an execution machine already signed into its selected BB provider
 and configure that machine for background compaction as above. Rebuild/reload an
 existing local installation with `bb plugin build && bb plugin reload optbot`.
 Do not install as an in-place rename of Bots Sidebar; migration remains separate.

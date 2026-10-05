@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Compression, MemoryKind } from "../lib/optchat";
+import type {PluginProviderReasoningLevel} from "@get-bb/plugin-sdk";
 
 export type ModelEvent =
   | { kind: "talk"; id: string; text: string }
@@ -9,7 +10,7 @@ export type ModelEvent =
   | { kind: "echo"; id: string; text: string; error?: boolean }
   | { kind: "result"; success: boolean; text: string };
 export type AgentTool = { name: string; description: string; inputSchema: unknown; execute: (input: Record<string, unknown>) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> };
-export type ModelOptions = { cwd: string; model: string; instructions: string; permissionMode: "full" | "plan"; env: NodeJS.ProcessEnv; signal: AbortSignal; tools: AgentTool[]; incoming?: () => { id: string; text: string }[]; onUsage?: (usage: unknown) => void };
+export type ModelOptions = { cwd: string; model: string; instructions: string; permissionMode: "full" | "plan" | "auto" | "accept-edits"; reasoningLevel?:PluginProviderReasoningLevel;serviceTier?:"default"|"fast";env: NodeJS.ProcessEnv; signal: AbortSignal; tools: AgentTool[]; incoming?: () => { id: string; text: string }[]; onUsage?: (usage: unknown) => void };
 export interface ModelBoundary {
   stream(prompt: string, options: ModelOptions): AsyncIterable<ModelEvent>;
   summarize(prompt: string, options: Omit<ModelOptions, "tools">): Promise<string>;

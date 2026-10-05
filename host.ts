@@ -7,20 +7,21 @@ import {join} from "node:path";
 import { z } from "zod";
 import {
   experimental_defineProviderBridge, createBridgeIo, bridgeRequestEnvelopeSchema,
-  initializeParamsSchema, threadStartParamsSchema, threadResumeParamsSchema,
+  initializeParamsSchema, modelListParamsSchema, threadStartParamsSchema, threadResumeParamsSchema,
   turnStartParamsSchema, turnSteerParamsSchema, threadStopParamsSchema, threadDeltaSchema,
   decodeToolCallResponsePayload, sanitizeInheritedChildProcessEnv,
   type ThreadDelta,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { apiModel } from "./runtime/models";
-import { codexModels } from "./runtime/codex";
+import { bbCatalog } from "./runtime/bb-catalog";
+import { bbWorkerModel } from "./runtime/bb";
 import { workspaceTools } from "./runtime/workspace";
 import { runOptChatTurn, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
 
 export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void } = {}) {
   const io = createBridgeIo<unknown>({ write: deps.write });
   const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string }>();
-  type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;promptMode?:"plan";incoming:{id:string;text:string}[];received:Map<string,string>};
+  type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:{id:string;text:string}[];received:Map<string,string>};
   const active = new Map<string, State>();
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   const model = deps.model ?? apiModel;
@@ -71,7 +72,8 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     };
     try {
       if (params.input.some((block) => block.type === "image")) throw new Error("OptBot currently supports text and local attachments; use a local image path instead of an inline/remote image");
-      if (params.options.permissionMode !== "full") throw new Error("OptBot executes workspace tools only with explicit Full access; it never silently escalates another mode");
+      if (!params.options.model?.startsWith("bb/") && params.options.permissionMode !== "full") throw new Error("Direct API OptBot tools require explicit Full access; OptBot never silently escalates permissions. Choose a BB provider for native permissions");
+      if (!params.options.model?.startsWith("bb/") && (params.options.serviceTier==="fast" || (params.options.reasoningLevel && params.options.reasoningLevel!=="medium"))) throw new Error("These execution controls require a native BB provider; direct API transports only support standard tier and medium reasoning.");
       const instructionFiles:string[]=[];
       if(session.instructionMode==="append")for(const name of ["AGENTS.md","CLAUDE.md"]){
         const path=join(session.cwd,name);
@@ -79,18 +81,23 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       }
       const options:ModelOptions={
         cwd:session.cwd,model:params.options.model??"bb/codex",instructions:[...instructionFiles,params.options.instructions??session.options.instructions??""].join("\n\n"),
-        permissionMode:params.options.promptMode==="plan"?"plan":"full",
+        permissionMode:params.options.promptMode==="plan"?"plan":params.options.permissionMode,
+        reasoningLevel:params.options.reasoningLevel,serviceTier:params.options.serviceTier,
         env:{...sanitizeInheritedChildProcessEnv({env:process.env}),...session.options.envVars,...params.options.envVars},signal:state.controller.signal,
         incoming:()=>state.incoming.splice(0),
-        tools:(session.dynamicTools??[]).filter(tool=>tool.name!=="optbot_chat"&&(params.options.promptMode!=="plan"||["optbot_read_state","optbot_memory"].includes(tool.name))).map(entry=>({...entry,execute:async(input)=>{const response=decodeToolCallResponsePayload(await call(params.threadId,entry.name,input,providerTurnId));return {content:[{type:"text" as const,text:response.content}],isError:response.isError};}})),
+        tools:(session.dynamicTools??[]).filter(tool=>!["optbot_chat","optbot_worker"].includes(tool.name)&&(params.options.promptMode!=="plan"||["optbot_read_state","optbot_memory"].includes(tool.name))).map(entry=>({...entry,execute:async(input)=>{const response=decodeToolCallResponsePayload(await call(params.threadId,entry.name,input,providerTurnId));return {content:[{type:"text" as const,text:response.content}],isError:response.isError};}})),
       };
-      if(!deps.model) {
+      if(!deps.model && !options.model.startsWith("bb/")) {
         const navigation=[{name:"zoom",description:"Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.",parameters:z.object({id:z.number().int().nonnegative(),n:z.number().int().positive()}).strict()},
           {name:"date",description:"The date and time of message id.",parameters:z.object({id:z.number().int().nonnegative()}).strict()}].map(entry=>({name:entry.name,description:entry.description,inputSchema:z.toJSONSchema(entry.parameters),execute:async(input:Record<string,unknown>)=>{const parsed=entry.parameters.parse(input);const value=await memory(params.threadId,{action:entry.name,start:parsed.id,...("n" in parsed?{count:parsed.n}:{})},providerTurnId);return {content:[{type:"text" as const,text:String(value)}]};}}));
         options.tools=[...new Map([...workspaceTools(options),...options.tools,...navigation].map(tool=>[tool.name,tool])).values()];
       }
       await runOptChatTurn({
-        call: (input) => memory(params.threadId, input, providerTurnId), model,
+        call: (input) => memory(params.threadId, input, providerTurnId), model: !deps.model && options.model.startsWith("bb/") ? bbWorkerModel(async(input)=>{
+          const result=decodeToolCallResponsePayload(await call(params.threadId,"optbot_worker",input,providerTurnId));
+          if(result.isError)throw new Error(result.content);
+          return JSON.parse(result.content);
+        }) : model,
         requestId: params.clientRequestId,
         background: !deps.model,
         input: params.input.map((block) => block.type === "text" ? block.text : block.type === "localFile" || block.type === "localImage" ? `Attached ${block.type === "localImage" ? "image" : "file"} on this execution machine: ${JSON.stringify({ path: block.path, ...(block.type === "localFile" ? { name: block.name } : {}) })}. Inspect it with your file tools if the current request requires it.` : "").join("\n\n"),
@@ -115,10 +122,10 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         if (params.protocolVersion !== 2) throw new Error("OptBot requires provider bridge protocol 2");
         io.sendResult(req.id, { protocolVersion: 2, capabilities: { sessionRestore: true, fork: "none", grammarVersions: [2, 3], approvalEnforcedBy: "provider", steerMode: "inject", skills: { configure: false } } });
       } else if (req.method === "model/list") {
-        let native: Awaited<ReturnType<typeof codexModels>> = [];
-        try { native = await codexModels(sanitizeInheritedChildProcessEnv({ env: process.env }), AbortSignal.timeout(15_000)); } catch { /* Keep a selectable native default when a catalog probe fails. */ }
-        const models = [{ id: "bb/codex", displayName: "BB Codex — configured default (no API key)", isDefault: true }, ...native, ...["sonnet", "opus", "haiku"].map((id) => ({ id, displayName: `Anthropic API ${id}`, isDefault: false })),{id:"openai/gpt-5.6",displayName:"OpenAI API GPT-5.6",isDefault:false}];
-        io.sendResult(req.id, { models: models.map(model => ({ ...model, model: model.id, description: "Fresh per-turn context from this bot's OptChat history", supportedReasoningEfforts: [{reasoningEffort:"medium",description:"Medium"}], defaultReasoningEffort:"medium" })), selectedOnlyModels: [] });
+        let native: Awaited<ReturnType<typeof bbCatalog>> = [];
+        try { native = await bbCatalog(modelListParamsSchema.parse(req.params).cwd); } catch { /* BB remains the authority; a failed probe is not an authentication fallback. */ }
+        const models = native.length ? native : [{ id: "bb/codex", displayName: "BB Codex — configured default", isDefault: true }];
+        io.sendResult(req.id, { models: models.map(model => ({ ...model, model: model.id, description: "BB-managed execution with fresh OptChat context", supportedReasoningEfforts: "supportedReasoningEfforts" in model ? model.supportedReasoningEfforts : [{reasoningEffort:"medium",description:"Medium"}], defaultReasoningEffort:"defaultReasoningEffort" in model ? model.defaultReasoningEffort : "medium" })), selectedOnlyModels: [] });
       } else if (req.method === "thread/start" || req.method === "thread/resume") {
         const params = req.method === "thread/start" ? threadStartParamsSchema.parse(req.params) : threadResumeParamsSchema.parse(req.params);
         if (active.has(params.threadId)) throw new Error("Cannot reconstruct an active OptBot conversation");
@@ -132,14 +139,14 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         const session = sessions.get(params.threadId);
         if (!session || session.providerThreadId !== params.providerThreadId) throw new Error("Start or resume this OptBot conversation first");
         if (active.has(params.threadId)) throw new Error("Conversation already has an active turn");
-        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"bb/codex",promptMode:params.options.promptMode,incoming:[],received:new Map([[params.clientRequestId,params.input.map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
+        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"bb/codex",permissionMode:params.options.permissionMode,promptMode:params.options.promptMode,incoming:[],received:new Map([[params.clientRequestId,params.input.map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
         active.set(params.threadId, state);
         io.sendResult(req.id, {});
         void run(params, state);
       } else if(req.method==="turn/steer") {
         const params=turnSteerParamsSchema.parse(req.params),state=active.get(params.threadId),session=sessions.get(params.threadId);
         if(!state||!session||session.providerThreadId!==params.providerThreadId||state.providerTurnId!==params.expectedTurnId||state.controller.signal.aborted)throw new Error("The expected OptBot turn is no longer active; queue this input for the next turn");
-        if(params.options.permissionMode!=="full"||params.options.promptMode!==state.promptMode||(params.options.model!==undefined&&params.options.model!==state.model))throw new Error("Model and permission changes take effect on a fresh turn, not during steering");
+        if(params.options.permissionMode!==state.permissionMode||params.options.promptMode!==state.promptMode||(params.options.model!==undefined&&params.options.model!==state.model))throw new Error("Model and permission changes take effect on a fresh turn, not during steering");
         if(params.input.some(block=>block.type!=="text"))throw new Error("Mid-turn steering currently requires text input");
         const text=params.input.map(block=>block.type==="text"?block.text:"").join("\n\n"),prior=state.received.get(params.clientRequestId);
         if(prior!==undefined&&prior!==text)throw new Error("A client request ID cannot be reused with different input");

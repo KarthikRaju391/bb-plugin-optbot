@@ -13,6 +13,8 @@ import { botProjectContext } from "./lib/project-context";
 import { BOT_GUIDANCE, botInstructions } from "./lib/bot-instructions";
 import { MEMORY_MAX_CHARS, validateMemory } from "./lib/memory-limit";
 import { registerOptChat } from "./lib/optchat-plugin";
+import { createBbWorkers, workerInput } from "./lib/bb-workers";
+import { bbModelRef } from "./runtime/bb";
 import { memoryCommands } from "./lib/memory-operations";
 export { rpcContract, avatarSchema } from "./contract";
 export type { BotAvatar, BotMetadata, BotSection, ProjectCreateInput } from "./contract";
@@ -23,6 +25,7 @@ const sha256 = (content: string) => createHash("sha256").update(content).digest(
 
 export default async function plugin(bb: BbPluginApi) {
   const store = createBotStore(bb);
+  const workers = createBbWorkers(bb);
   const publish = () => bb.realtime.publish(CHANGED, { updatedAt: Date.now() });
   const state = createPrivateBotState(bb, store, publish);
   const importLegacy = createLegacyImporter(bb, store);
@@ -50,6 +53,8 @@ export default async function plugin(bb: BbPluginApi) {
     return inherited || null;
   }
   async function resolveOwner(threadId: string, persist = true): Promise<string | null> {
+    const workerBot = workers.owner(threadId);
+    if (workerBot) return workerBot;
     const chain: string[] = [];
     let current: string | null = threadId;
     let botId: string | null = null;
@@ -214,11 +219,23 @@ export default async function plugin(bb: BbPluginApi) {
     });
   }
   const contextOwner = (ctx: PluginAgentConfigurationContext) => owner(ctx.thread);
-  const optchat=await registerOptChat(bb, resolveOwner);
+  const optchat=await registerOptChat(bb, resolveOwner, workers);
   bb.agents.configure((ctx) => {
+    const worker = workers.configuration(ctx);
+    if (worker) return { tools: worker.role === "master" ? ["optbot_read_state", "optbot_update_state", "optbot_memory"] : [], skills: [], instructions: worker.instructions };
     const botId = contextOwner(ctx);
     const bot = botId ? store.get(botId) : null;
-    return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
+    return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory", "optbot_worker"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
+  });
+  bb.agents.registerTool({
+    name: "optbot_worker", description: "Private OptChat execution protocol. Delegates to installed BB providers; never an agent-facing tool.", parameters: workerInput,
+    async execute(input,ctx) {
+      const thread = await bb.sdk.threads.get({threadId:ctx.threadId});
+      if (thread.providerId !== "optbot") throw new Error("Only the OptBot orchestration bridge can manage workers");
+      const bot = await resolveOwner(ctx.threadId);
+      if (!bot) throw new Error("Conversation is not assigned to an OptBot");
+      return JSON.stringify(await workers.execute(input,ctx.threadId,bot));
+    },
   });
   bb.agents.registerTool({
     name: "optbot_read_state", description: "Read this bot's identity, pinned context, settings, or linked projects. Use optbot_memory for conversation history.",
@@ -312,7 +329,12 @@ export default async function plugin(bb: BbPluginApi) {
       const next = store.save({ ...latest, mainThreadId: threadId, updatedAt: nextTimestamp(latest.updatedAt) }); publish(); return next;
     }),
     conversation_create: async ({ botId, request, makeMain }) => {
-      if (request.providerId !== "optbot") throw new Error("Choose the OptBot (Claude) provider; other harnesses do not provide fresh per-turn OptChat context.");
+      if (request.providerId && request.providerId !== "optbot") {
+        const model = `bb/${request.providerId}${request.model ? `/${request.model}` : ""}`;
+        bbModelRef(model);
+        request = { ...request, providerId: "optbot", model, executionInputSources: { ...request.executionInputSources, providerId: "explicit", model: "explicit" } };
+      }
+      if (!request.providerId) throw new Error("Choose a BB provider for this bot conversation");
       if (request.projectId !== await personalProjectId()) await updateProjectRole(botId, "join", request.projectId);
       return serial(botId, async () => {
         const bot = await state.prepare(botId);
