@@ -276,6 +276,25 @@ export default async function plugin(bb: BbPluginApi) {
   registerBotMentions(bb, store);
 
   bb.rpc.register(rpcContract, {
+    memory_inspect: ({ botId, stream, offset, snapshotToken: expectedToken }) => {
+      store.require(botId);
+      const snapshot=optchat.snapshot(botId);
+      const text=stream==="view"?snapshot.view:(stream==="main"?snapshot.main:snapshot.tree).map(line=>JSON.stringify(line)+"\n").join("");
+      const snapshotToken=sha256(text);
+      const snapshotReset=offset>0 && expectedToken!==undefined && expectedToken!==snapshotToken;
+      if(snapshotReset)offset=0;
+      const end=Math.min(offset+16384,text.length);
+      return {jsonl:text.slice(offset,end),offset,total:text.length,nextOffset:end<text.length?end:null,messages:snapshot.main.length,summaries:snapshot.tree.length,settled:optchat.settled(botId),snapshotToken,snapshotReset};
+    },
+    memory_node: ({ botId, start, count }) => {
+      store.require(botId);
+      if(start%count!==0)throw new Error("Start must align to the node span");
+      const snapshot=optchat.snapshot(botId);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(count) || start + count > snapshot.main.length) throw new Error("Invalid memory node");
+      const node=snapshot.tree.find(node=>node.l===Math.log2(count)&&node.i===start/count);
+      const parent=node?.text??null, children=optchat.zoomText(botId,start,count);
+      return {start,count,parent:parent?.slice(0,65536)??null,children:children.slice(0,65536),parentTruncated:(parent?.length??0)>65536,childrenTruncated:children.length>65536};
+    },
     project_browse: ({ hostId, path }) => browseProjectDirectory(bb, { hostId, path }),
     project_create: (input) => serial("project-create", () => serial(`project-create:${input.requestId}`, () => createWorkProject(bb, store, input))),
     bots_list: async () => {

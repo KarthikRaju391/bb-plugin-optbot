@@ -84,6 +84,8 @@ export const stateMutationToolSchema = z.object({
 export const stateMutationResultSchema = z.object({ botId: id, target: stateTargetSchema, changed: z.boolean(), revision: z.number(), state: z.json() }).strict();
 
 export const rpcContract = defineRpcContract({
+  memory_inspect: { input: z.object({ botId: id, stream: z.enum(["main", "tree", "view"]), offset: z.number().int().nonnegative().default(0), snapshotToken: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(), output: z.object({ jsonl: z.string().max(16384), offset: z.number(), total: z.number(), nextOffset: z.number().nullable(), messages: z.number(), summaries: z.number(), settled: z.boolean(), snapshotToken: z.string().regex(/^[a-f0-9]{64}$/), snapshotReset: z.boolean() }).strict() },
+  memory_node: { input: z.object({ botId: id, start: z.number().int().nonnegative(), count: z.number().int().positive().refine(n => Number.isInteger(Math.log2(n)), "Count must be a power of two") }).strict(), output: z.object({ start: z.number(), count: z.number(), parent: z.string().max(65536).nullable(), children: z.string().max(65536), parentTruncated: z.boolean(), childrenTruncated: z.boolean() }).strict() },
   bots_list: { input: z.null(), output: z.object({ bots: z.array(metadataSchema), hosts: z.array(hostSchema), sections: z.array(sectionSchema), projects: z.array(projectSchema), threadBindings: z.array(z.object({ threadId: id, botId: id }).strict()), warnings: z.array(z.string()), personalProjectId: id, projectOwners: z.array(projectOwnerSchema).optional() }).strict() },
   project_browse: { input: projectBrowseInputSchema, output: projectBrowseOutputSchema },
   project_create: { input: projectCreateInputSchema, output: projectSchema },

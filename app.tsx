@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { MemoryInspector } from "./components/memory-inspector";
 import type { DragEvent, PointerEvent as ReactPointerEvent, ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
@@ -61,7 +62,7 @@ type HostOption = { id: string; name: string; connected: boolean };
 type ProjectOption = { id: string; name: string };
 type BotEditFields = Pick<BotMetadata, "hostId" | "name" | "role" | "avatar" | "sectionId" | "linkedProjectIds" | "soul" | "settings"> & { ownedProjectIds: string[]; memory?: string };
 type ProjectRole = "none" | "member" | "owner";
-type EditorTab = "setup" | "instructions" | "state" | "projects" | "appearance";
+type EditorTab = "setup" | "instructions" | "state" | "memory" | "projects" | "appearance";
 type EditorTarget =
   | { kind: "create" }
   | { kind: "edit"; metadata: BotMetadata; projectOwners: ProjectOwner[]; tab?: EditorTab };
@@ -185,7 +186,7 @@ function BotEditor({ target, hosts, sections, projects, bots, projectOwners, onC
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<EditorTab>(editing ? target.tab ?? "setup" : "setup");
   const tabsId = useId();
-  const tabs = ([{ id: "setup", label: "Setup" }, { id: "instructions", label: "Instructions" }, { id: "state", label: "State" }, { id: "projects", label: `Projects${linkedProjectIds.length ? ` · ${linkedProjectIds.length}` : ""}` }, { id: "appearance", label: "Appearance" }] as const).filter((entry) => editing || entry.id !== "state");
+  const tabs = ([{ id: "setup", label: "Setup" }, { id: "instructions", label: "Instructions" }, { id: "state", label: "State" }, { id: "memory", label: "Memory" }, { id: "projects", label: `Projects${linkedProjectIds.length ? ` · ${linkedProjectIds.length}` : ""}` }, { id: "appearance", label: "Appearance" }] as const).filter((entry) => editing || (entry.id !== "state" && entry.id !== "memory"));
   function setProjectRole(projectId: string, next: ProjectRole) {
     const otherOwner = owners.find((owner) => owner.projectId === projectId && owner.botId !== botId);
     if (next === "owner" && otherOwner) return;
@@ -274,6 +275,7 @@ function BotEditor({ target, hosts, sections, projects, bots, projectOwners, onC
             </div>
             <textarea aria-label="SOUL.md" className="min-h-24 w-full flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground" value={soul} maxLength={4096} disabled={pending} onChange={(event) => setSoul(event.target.value)} onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} placeholder="Personality, perspective, and communication style." />
           </div> : null}
+          {editing && tab === "memory" && botId ? <MemoryInspector botId={botId} /> : null}
           {editing && tab === "state" ? <div className="flex h-full min-h-0 flex-col gap-2">
             <div className="flex shrink-0 items-center justify-between gap-2"><div role="group" aria-label="State file" className="flex gap-1">{(["MEMORY.md", "settings.json"] as const).map((file) => <Button key={file} type="button" variant="ghost" size="sm" className="h-7 px-2" aria-pressed={stateFile === file} onClick={() => setStateFile(file)}>{file}</Button>)}</div><span className="text-[10px] text-muted-foreground">{(stateFile === "MEMORY.md" ? memory : settingsText).length}/{stateFile === "MEMORY.md" ? MEMORY_MAX_CHARS : 16384}</span></div>
             <textarea aria-label={stateFile} className="min-h-24 w-full flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground" value={stateFile === "MEMORY.md" ? memory : settingsText} maxLength={stateFile === "MEMORY.md" ? undefined : 16384} disabled={pending} spellCheck={false} onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onChange={(event) => stateFile === "MEMORY.md" ? setMemory(event.target.value) : setSettingsText(event.target.value)} />
