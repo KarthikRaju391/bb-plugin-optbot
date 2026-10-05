@@ -102,7 +102,15 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
       switch (input.action) {
         case "begin": result = chat.begin(bot, ctx.threadId, required(input.requestId, "requestId"), input.text); break;
         case "heartbeat": result = chat.heartbeat(bot, ctx.threadId, lease()); break;
-        case "settled": chat.heartbeat(bot,ctx.threadId,lease()); result={settled:chat.settled(bot)}; break;
+        case "settled": {
+          chat.heartbeat(bot,ctx.threadId,lease());
+          const settled=chat.settled(bot);
+          if(!settled) {
+            const {compactorModel,allowNativeSummaryTools}=await settings.get();
+            if(typeof compactorModel==="string"&&compactorModel.startsWith("bb/")&&allowNativeSummaryTools!==true)throw new Error("Memory compaction is paused: enable allowNativeSummaryTools in OptBot settings to permit native background summaries, or choose a text-only API summarizer. Original history is retained.");
+          }
+          result={settled}; break;
+        }
         case "checkpoint": result = chat.checkpoint(bot, ctx.threadId, lease(), required(input.text, "text")); break;
         case "record": result = chat.record(bot, ctx.threadId, lease(), required(input.key, "key"), required(input.kind, "kind"), required(input.text, "text")); break;
         case "input": result=chat.input(bot,ctx.threadId,lease(),required(input.requestId,"requestId"),required(input.text,"text"));break;

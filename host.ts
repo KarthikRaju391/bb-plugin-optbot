@@ -155,7 +155,14 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       } else if (req.method === "thread/stop") {
         const params = threadStopParamsSchema.parse(req.params);
         const state = active.get(params.threadId);
-        if (state) { state.released = params.intent === "release"; state.controller.abort(); }
+        if (state) {
+          state.released = params.intent === "release";
+          state.controller.abort();
+          // BB may reconstruct immediately after releasing the runtime. The
+          // detached turn still unwinds its lease/worker cleanup, but cannot
+          // publish stale deltas or delete a newer turn's state in finally.
+          if (state.released) active.delete(params.threadId);
+        }
         io.sendResult(req.id, {});
       } else io.sendError(req.id, -32601, `Unsupported method: ${req.method}`);
     } catch (error) { io.sendError(req.id, error instanceof z.ZodError ? -32602 : -32000, error instanceof Error ? error.message : String(error)); }
