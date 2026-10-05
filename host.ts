@@ -13,7 +13,6 @@ import {
   type ThreadDelta,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { apiModel } from "./runtime/models";
-import { bbCatalog } from "./runtime/bb-catalog";
 import { bbWorkerModel } from "./runtime/bb";
 import { workspaceTools } from "./runtime/workspace";
 import { runOptChatTurn, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
@@ -122,12 +121,10 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         if (params.protocolVersion !== 2) throw new Error("OptBot requires provider bridge protocol 2");
         io.sendResult(req.id, { protocolVersion: 2, capabilities: { sessionRestore: true, fork: "none", grammarVersions: [2, 3], approvalEnforcedBy: "provider", steerMode: "inject", skills: { configure: false } } });
       } else if (req.method === "model/list") {
-        let native: Awaited<ReturnType<typeof bbCatalog>> = [];
-        try { native = await bbCatalog(modelListParamsSchema.parse(req.params).cwd); } catch { /* BB remains the authority; a failed probe is not an authentication fallback. */ }
-        const models = native.length ? native : [{ id: "bb/codex", displayName: "BB Codex — configured default", isDefault: true }];
-        // Choose models in BB's native picker. Wrapped identities remain available
-        // only for resolving a conversation's existing selection, not as a second catalog.
-        io.sendResult(req.id, { models: [], selectedOnlyModels: models.map(model => ({ ...model, model: model.id, description: "BB-managed execution with fresh OptChat context", supportedReasoningEfforts: "supportedReasoningEfforts" in model ? model.supportedReasoningEfforts : [{reasoningEffort:"medium",description:"Medium"}], defaultReasoningEffort:"defaultReasoningEffort" in model ? model.defaultReasoningEffort : "medium" })) });
+        modelListParamsSchema.parse(req.params);
+        // BB exposes selectedOnlyModels in "More models", too. Do not mirror
+        // native choices in either list; creation supplies the chosen identity.
+        io.sendResult(req.id, { models: [], selectedOnlyModels: [] });
       } else if (req.method === "thread/start" || req.method === "thread/resume") {
         const params = req.method === "thread/start" ? threadStartParamsSchema.parse(req.params) : threadResumeParamsSchema.parse(req.params);
         if (active.has(params.threadId)) throw new Error("Cannot reconstruct an active OptBot conversation");

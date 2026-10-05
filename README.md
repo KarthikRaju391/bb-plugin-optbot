@@ -58,9 +58,11 @@ that selection as `bb/<provider>/<model>` and runs a fresh hidden BB worker for
 each master turn. The visible conversation remains on the `optbot` orchestration
 provider so selecting another execution provider does not bypass memory.
 Existing `bb/codex` conversations now delegate to BB's installed Codex provider.
-OptBot publishes no second selectable model catalog or cold-cache fallback list.
-Wrapped model identities are returned as `selectedOnlyModels`, solely to resolve
-an existing conversation's native selection. BB SDK 0.5.29 has no internal/hidden
+OptBot publishes empty `models` and `selectedOnlyModels`: BB exposes the latter
+in **More models**, so neither list may mirror native choices. Creation supplies
+the exact wrapped model identity without relying on a catalog. Existing threads
+can consequently show their raw stored model identifier without friendly model
+labels or model-specific reasoning controls. BB SDK 0.5.29 has no internal/hidden
 provider policy or per-composer provider filter, so the OptBot provider tab can
 still appear. Removing that tab while retaining orchestration needs a BB API
 change; choosing a native provider directly on an existing outer thread bypasses
