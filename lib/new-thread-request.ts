@@ -20,6 +20,16 @@ const input = z.discriminatedUnion("type", [
   z.object({ type: z.literal("localFile"), path: z.string(), mimeType: z.string().optional(), name: z.string().optional(), sizeBytes: z.number().nonnegative().optional(), visibility }).strict(),
 ]);
 const environment = z.discriminatedUnion("type", [
+  // The current native composer uses environment providers, including
+  // personal-workspace for projectless conversations (SDK 0.5.29).
+  z.object({
+    type: z.literal("provider"), environmentProviderId: id,
+    inputs: z.json().nullable().default(null),
+    machine: z.discriminatedUnion("type", [
+      z.object({ type: z.literal("existing"), hostId: id }).strict(),
+      z.object({ type: z.literal("new"), machineProviderId: id, inputs: z.json().nullable().default(null) }).strict(),
+    ]).optional(),
+  }).strict(),
   z.object({ type: z.literal("reuse"), environmentId: id }).strict(),
   z.object({ type: z.literal("project-default") }).strict(),
   z.object({
