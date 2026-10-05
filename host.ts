@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
+import { modelHostContract } from "./runtime/host-contract";
+import { compactNode } from "./lib/compactor";
 import {lstat,readFile} from "node:fs/promises";
 import {join} from "node:path";
 import { z } from "zod";
@@ -10,6 +13,7 @@ import {
   type ThreadDelta,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { apiModel } from "./runtime/models";
+import { codexModels } from "./runtime/codex";
 import { workspaceTools } from "./runtime/workspace";
 import { runOptChatTurn, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
 
@@ -74,7 +78,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         try{const info=await lstat(path);if(!info.isFile()||info.isSymbolicLink())throw new Error(`${name} must be a regular instruction file`);instructionFiles.push(`${name}\n${await readFile(path,"utf8")}`);}catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}
       }
       const options:ModelOptions={
-        cwd:session.cwd,model:params.options.model??"sonnet",instructions:[...instructionFiles,params.options.instructions??session.options.instructions??""].join("\n\n"),
+        cwd:session.cwd,model:params.options.model??"bb/codex",instructions:[...instructionFiles,params.options.instructions??session.options.instructions??""].join("\n\n"),
         permissionMode:params.options.promptMode==="plan"?"plan":"full",
         env:{...sanitizeInheritedChildProcessEnv({env:process.env}),...session.options.envVars,...params.options.envVars},signal:state.controller.signal,
         incoming:()=>state.incoming.splice(0),
@@ -111,7 +115,10 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         if (params.protocolVersion !== 2) throw new Error("OptBot requires provider bridge protocol 2");
         io.sendResult(req.id, { protocolVersion: 2, capabilities: { sessionRestore: true, fork: "none", grammarVersions: [2, 3], approvalEnforcedBy: "provider", steerMode: "inject", skills: { configure: false } } });
       } else if (req.method === "model/list") {
-        io.sendResult(req.id, { models: [...["sonnet", "opus", "haiku"].map((id) => ({ id, displayName: `Anthropic ${id}`, isDefault: id === "sonnet" })),{id:"openai/gpt-5.6",displayName:"OpenAI GPT-5.6",isDefault:false}] });
+        let native: Awaited<ReturnType<typeof codexModels>> = [];
+        try { native = await codexModels(sanitizeInheritedChildProcessEnv({ env: process.env }), AbortSignal.timeout(15_000)); } catch { /* Keep a selectable native default when a catalog probe fails. */ }
+        const models = [{ id: "bb/codex", displayName: "BB Codex — configured default (no API key)", isDefault: true }, ...native, ...["sonnet", "opus", "haiku"].map((id) => ({ id, displayName: `Anthropic API ${id}`, isDefault: false })),{id:"openai/gpt-5.6",displayName:"OpenAI API GPT-5.6",isDefault:false}];
+        io.sendResult(req.id, { models: models.map(model => ({ ...model, model: model.id, description: "Fresh per-turn context from this bot's OptChat history", supportedReasoningEfforts: [{reasoningEffort:"medium",description:"Medium"}], defaultReasoningEffort:"medium" })), selectedOnlyModels: [] });
       } else if (req.method === "thread/start" || req.method === "thread/resume") {
         const params = req.method === "thread/start" ? threadStartParamsSchema.parse(req.params) : threadResumeParamsSchema.parse(req.params);
         if (active.has(params.threadId)) throw new Error("Cannot reconstruct an active OptBot conversation");
@@ -125,7 +132,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         const session = sessions.get(params.threadId);
         if (!session || session.providerThreadId !== params.providerThreadId) throw new Error("Start or resume this OptBot conversation first");
         if (active.has(params.threadId)) throw new Error("Conversation already has an active turn");
-        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"sonnet",promptMode:params.options.promptMode,incoming:[],received:new Map([[params.clientRequestId,params.input.map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
+        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"bb/codex",promptMode:params.options.promptMode,incoming:[],received:new Map([[params.clientRequestId,params.input.map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
         active.set(params.threadId, state);
         io.sendResult(req.id, {});
         void run(params, state);
@@ -166,3 +173,11 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
   });
 }
 export const experimental_providerBridge = createOptBotBridge();
+export default experimental_defineHostEntry({
+  contract: modelHostContract,
+  handlers: {
+    async compact({ task, model }, context) {
+      return compactNode(task, { model, system: "", env: sanitizeInheritedChildProcessEnv({ env: process.env }), signal: AbortSignal.any([context.signal, context.lifecycle.signal]) });
+    },
+  },
+});

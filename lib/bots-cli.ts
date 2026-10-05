@@ -4,6 +4,7 @@ import type { BotStore } from "./bot-store";
 
 const USAGE = `bb optbot list [--json] [--limit 1-100] [--offset N]
 bb optbot message <bot-id-or-exact-name> <message> [--thread <conversation-id>] [--json]
+bb optbot model check
 
 Messages go to the bot's main conversation by default and queue while it is busy.
 --thread targets a conversation belonging to that bot (for replies).
@@ -77,17 +78,19 @@ export function frameBotMessage(sender: Sender, message: string): string {
   ].join("\n");
 }
 
-export function registerBotsCli(bb: BbPluginApi, store: BotStore, resolveOwner: (threadId: string, persist?: boolean) => Promise<string | null>, memory?: (argv:string[],ctx:PluginCliContext)=>Promise<{exitCode:number;stdout?:string;stderr?:string}>) {
+export function registerBotsCli(bb: BbPluginApi, store: BotStore, resolveOwner: (threadId: string, persist?: boolean) => Promise<string | null>, memory?: (argv:string[],ctx:PluginCliContext)=>Promise<{exitCode:number;stdout?:string;stderr?:string}>, checkModel?:()=>Promise<unknown>) {
   bb.cli.register({
     name: "optbot", summary: "List OptBots and send attributed asynchronous messages to their conversations",
     commands: [
       { name: "list", summary: "List bot IDs, activity, visibility, and owned/joined project names without private state", usage: "bb optbot list [--json] [--limit 1-100] [--offset N]" },
       { name: "message", summary: "Message a bot's main conversation, or reply to one of its conversations; queues while busy", usage: "bb optbot message <bot-id-or-exact-name> <message> [--thread <conversation-id>] [--json]" },
       ...(memory?[{name:"memory",usage:"bb optbot memory <view|browse|backup|import> <bot-id> [JSON]",summary:"Inspect, back up, or import private OptChat history"}]:[]),
+      ...(checkModel?[{name:"model",usage:"bb optbot model check",summary:"Verify the configured BB host can summarize with its native login (no history writes or helper threads)"}]:[]),
     ],
     async run(argv, ctx) {
       try {
         if(argv[0]==="memory"&&memory)return await memory(argv.slice(1),ctx);
+        if(argv[0]==="model"&&checkModel){if(argv.length!==2||argv[1]!=="check")throw new Error("Usage: bb optbot model check");return {exitCode:0,stdout:JSON.stringify(await checkModel(),null,2)};}
         const options = parse(argv);
         if (!options) return { exitCode: 0, stdout: USAGE };
         if (options.command === "list") {

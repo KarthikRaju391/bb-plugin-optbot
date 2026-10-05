@@ -74,7 +74,7 @@ export async function runOptChatTurn(args: {
       let feedback = "", summary = "";
       for (let retry = 0; retry < 5; retry++) {
         check();
-        summary = (await model.summarize(`${COMPACT}\n\n${task.context}\n\nCompress this source, whole:\n${task.source}\n${feedback}`, { ...options, model: args.compactorModel ?? "sonnet", instructions: COMPACT })).trim().replace(/\s*\n\s*/g, " ");
+        summary = (await model.summarize(`${COMPACT}\n\n${task.context}\n\nCompress this source, whole:\n${task.source}\n${feedback}`, { ...options, model: args.compactorModel ?? "bb/codex", instructions: COMPACT })).trim().replace(/\s*\n\s*/g, " ");
         if (summary && Buffer.byteLength(summary) <= 512) break;
         feedback = `Your previous answer was ${Buffer.byteLength(summary)} bytes; limit 512. Write a shorter line. Previous answer: ${summary}`;
       }

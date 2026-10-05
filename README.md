@@ -33,11 +33,12 @@ No original plugin installation or live bot records are changed by building it.
   the complete current input. The tool loop and mid-turn messages continue inside
   that call; signed/encrypted reasoning is preserved for provider caching but
   excluded from the conversation log. Completed thoughts can stream to the UI.
-- The master supports OpenAI Responses and Anthropic Messages directly, without
-  a Claude CLI/session dependency. Provider/model IDs are separate from memory;
-  switching the master does not regenerate its history. Compatible endpoints are
-  configurable. Fixed line-aligned view cache marks and automatic end caching
-  follow the reference; request usage is exposed through the adapter callback.
+- The default master reuses the authenticated Codex runtime on the BB execution
+  machine without an API key. Its native model catalog supplies the picker. OpenAI
+  Responses and Anthropic Messages remain available as explicit API alternatives.
+  Switching models does not regenerate history. API adapters implement the fixed
+  line-aligned cache marks; the native Codex adapter delegates caching and reasoning
+  retention to Codex, whose app-server does not expose those cache controls.
 - `zoom(id,n)` and `date(id)` implement the reference navigation tools. The
   compatibility `optbot_memory` tool adds paginated literal search and leaf
   paging. Both are scoped to the caller's bot. User instruction files
@@ -51,16 +52,45 @@ No original plugin installation or live bot records are changed by building it.
   after a remote action but before its response is recorded still needs human or
   service-level reconciliation.
 
-The execution host needs `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for the selected
-master, supplied through its environment or BB's environment configuration.
-Do not paste credentials into chat. The independently configured backend
-compactor uses the plugin's secret `compactorApiKey` setting (or the backend's
-provider environment key), `compactorModel`, and optional `compactorEndpoint`.
-CLI/OAuth logins are not substituted for API credentials. Custom endpoints use
-`OPTBOT_OPENAI_BASE_URL`/`OPTBOT_ANTHROPIC_BASE_URL`; they must support the named
-protocol, use HTTPS (loopback HTTP is permitted), and keep credentials separate
-from their URLs. Other protocol families require an additional model adapter;
-this is not a claim that every existing BB CLI provider has been integrated.
+### Run without an API key
+
+Choose **BB Codex — configured default (no API key)** (`bb/codex`), or a specific
+`bb/codex/<model>` from the live picker. OptBot starts an ephemeral Codex app-server
+session on the conversation's execution machine using that machine's existing
+Codex login/configuration, just as BB's Codex runtime does. It does not read or copy
+credential files, create helper BB threads, or resume persistent Codex history.
+This requires a Codex version supporting dynamic tools and empty `environments`;
+unsupported runtime requests fail closed rather than bypassing OptBot's tools.
+
+Set **Compactor BB machine ID** to the enrolled machine with that Codex login.
+The default `compactorModel` is also `bb/codex`; background jobs travel through
+the public SDK host-RPC contract, so authentication stays on that machine rather
+than requiring an API credential in the BB backend. The configured machine must
+remain online for large-message compaction. Example operator setup:
+
+```sh
+bb plugin config optbot set compactorHost <machine-id>
+bb plugin config optbot set compactorModel bb/codex
+bb plugin reload optbot
+bb optbot model check
+```
+
+The no-key adapter currently supports **Codex**, not every BB runtime (Claude
+Code, Pi, ACP/Hermes), and does not integrate BB Account Pooler routing or BB-only
+Codex plugin settings. It reuses the host's Codex login and native configuration.
+Native filesystem, MCP, web and delegation tools are disabled; OptBot's explicit
+memory/workspace tools remain the execution and recording boundary.
+
+`bb optbot model check` executes a small readiness summary through the actual
+configured host-RPC route and returns the model, machine ID, and generated text.
+It does not write bot history or create any BB threads; it consumes a model call.
+
+For explicitly selected API models only, the execution host needs
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. The API compactor instead uses the secret
+`compactorApiKey` setting (or the backend environment key) and optional
+`compactorEndpoint`. Never paste credentials into chat. Custom API endpoints use
+`OPTBOT_OPENAI_BASE_URL`/`OPTBOT_ANTHROPIC_BASE_URL`, must support the selected
+protocol and HTTPS (loopback HTTP permitted), and must keep keys out of URLs.
 
 Execute mode requires BB's explicit **Full access** permission; requests are never
 silently escalated. Plan mode omits write/shell/native mutation tools. Local-file
@@ -351,9 +381,11 @@ colliding with the jsdom UI harness. The local OptChat functional harness is in
 actual BB test-host routing, native protocol schemas, event assembly and SQLite.
 It does not establish live model quality, authentication or deployment success.
 
-Only after backing up/reviewing live migration and authenticating Claude should
-the operator install with `bb plugin install . --yes` and choose **OptBot** in
-Settings → Sidebar. Do not install as an in-place rename of Bots Sidebar.
+Install with `bb plugin install . --yes` and choose **OptBot** in Settings → Sidebar.
+For the default no-key path, use an execution machine already signed into Codex
+and configure that machine for background compaction as above. Rebuild/reload an
+existing local installation with `bb plugin build && bb plugin reload optbot`.
+Do not install as an in-place rename of Bots Sidebar; migration remains separate.
 
 This fork retains the upstream sidebar implementation. Avatar
 appearance options are adapted from [bloub](https://github.com/jeremy-prt/bloub).

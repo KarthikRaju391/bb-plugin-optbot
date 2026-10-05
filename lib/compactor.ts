@@ -4,13 +4,16 @@ import { apiConversation, type ApiOptions } from "../runtime/models";
 import { cacheBlocks, utf8Prefix } from "../runtime/cache";
 import { COMPACT } from "../runtime/prompts";
 import { SCALE } from "../runtime/scale";
+import { codexConversation } from "../runtime/codex";
 export const JOBS=8, TRIES=5, RETRY_MS=10_000;
-export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void};
+export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void; compact?:(task:Compression,options:ApiOptions)=>Promise<string>};
 
 export async function compactNode(task:Compression,options:ApiOptions) {
   const source=task.children?.map(line=>line.replace(/\r\n|\n|\r/g," ")).join("\n")??task.source;
   const step=`For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${task.count===1?"Compress this message into one line, in at most 512 bytes:":"Merge these two lines into one, in at most 512 bytes:"}\n${source}`;
-  const conversation=apiConversation([...cacheBlocks(task.context),{text:step,cache:false}],{...options,system:COMPACT,tools:[]});
+  const blocks=[...cacheBlocks(task.context),{text:step,cache:false}];
+  const conversation=options.model.startsWith("bb/")?codexConversation(blocks,{...options,system:COMPACT,tools:[]}):apiConversation(blocks,{...options,system:COMPACT,tools:[]});
+  try {
   const candidates:string[]=[];let feedback:string|undefined;
   for(let n=0;n<TRIES;n++) {
     options.signal.throwIfAborted();
@@ -21,6 +24,7 @@ export async function compactNode(task:Compression,options:ApiOptions) {
     feedback=`That line is ${size} bytes; the limit is 512. It must end where it is cut here:\n${utf8Prefix(line,NODE_BYTES)}| ← LIMIT`;
   }
   return candidates.reduce((best,line)=>Buffer.byteLength(line)<Buffer.byteLength(best)?line:best);
+  } finally { conversation.close?.(); }
 }
 function createCompactor(initial:CompactorConfig) {
   let config=initial,closed=false;
@@ -36,7 +40,7 @@ function createCompactor(initial:CompactorConfig) {
       const busy=new Set([...active.values()].filter(job=>job.bot===bot).map(job=>`${job.task.start}+${job.task.count}`));
       for(const task of config.chat.available(bot,busy,JOBS-active.size)) {
         const key=`${bot}:${task.start}:${task.count}`;let failed=false;
-        const work=Promise.resolve().then(async()=>compactNode(task,await config.options(controller.signal))).then(line=>{
+        const work=Promise.resolve().then(async()=>(config.compact??compactNode)(task,await config.options(controller.signal))).then(line=>{
           if(!closed) config.chat.accept(bot,task,line); failures.delete(key);
         }).catch(error=>{
           if(closed) return;failed=true;
