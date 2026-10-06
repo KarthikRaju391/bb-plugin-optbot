@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { BbPluginApi, PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import type { z } from "zod";
-import { rpcContract, stateReadSchema, stateMutationSchema, stateMutationToolSchema, stateMutationResultSchema, normalizeStateMutation, type BotMetadata, type BotStateMutation } from "./contract";
+import { rpcContract, stateReadSchema, stateMutationSchema, stateMutationToolSchema, stateMutationResultSchema, normalizeStateMutation, modelSelectionSchema, type ModelSelection, type BotMetadata, type BotStateMutation } from "./contract";
 import { createBotStore, EMPTY_HASHES, nextTimestamp } from "./lib/bot-store";
 import { applyState, BotStateConflictError, createPrivateBotState, stateContent } from "./lib/private-state";
 import { memoryFacts, mutateStateDocument } from "./lib/state-actions";
@@ -220,6 +220,15 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const contextOwner = (ctx: PluginAgentConfigurationContext) => owner(ctx.thread);
   const optchat=await registerOptChat(bb, resolveOwner, workers);
+  // Before OptBot has recorded a choice, show the model the conversation's last turn asked for.
+  async function lastRequestedModel(threadId: string): Promise<ModelSelection | null> {
+    const [event] = await bb.sdk.threads.events.list({ threadId, order: "desc", limit: "1", types: ["client/turn/requested"] });
+    const execution = event?.type === "client/turn/requested" ? event.data.execution : undefined;
+    const match = /^bb\/([a-z0-9-]+)\/(.+)$/.exec(execution?.model ?? "");
+    if (!execution || !match || match[1] === "optbot") return null;
+    const value = { providerId: match[1]!, model: match[2]!, reasoningLevel: execution.reasoningLevel ?? "medium", ...(execution.serviceTier ? { serviceTier: execution.serviceTier } : {}) };
+    return modelSelectionSchema.safeParse(value).success ? value as ModelSelection : null;
+  }
   bb.agents.configure((ctx) => {
     const worker = workers.configuration(ctx);
     // The worker prompt carries the full instructions; BB truncates configured ones.
@@ -300,7 +309,7 @@ export default async function plugin(bb: BbPluginApi) {
       // Rendered in every thread header: anything that is not an OptBot conversation hides the picker.
       if (!(await resolveOwner(threadId, false).catch(() => null))) return { owned: false, environmentId: null, value: null };
       const thread = await bb.sdk.threads.get({ threadId });
-      return { owned: thread.providerId === "optbot", environmentId: thread.environmentId ?? null, value: workers.selection(threadId)?.value ?? null };
+      return { owned: thread.providerId === "optbot", environmentId: thread.environmentId ?? null, value: workers.selection(threadId)?.value ?? await lastRequestedModel(threadId) };
     },
     conversation_model_set: async ({ threadId, value }) => {
       if (!(await resolveOwner(threadId, false))) throw new Error("This conversation is not assigned to an OptBot");
