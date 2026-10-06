@@ -22,7 +22,12 @@ function memoryInput<T extends { type: string; text?: string; visibility?: strin
   return input.filter(block => !(block.type === "text" && block.visibility === "agent-only" && /^\[bb-bot-start:([a-f0-9-]{36})\]/.test(block.text ?? "")));
 }
 
-export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void } = {}) {
+// Memory actions that are safe to repeat after a lost reply: keyed, idempotent or read-only.
+// begin and finish are excluded: repeating them after a lost success would misreport the turn.
+const RETRYABLE_MEMORY = new Set(["heartbeat", "record", "input", "checkpoint", "view", "settled", "work", "merge", "zoom", "date", "enqueue"]);
+class ToolTimeout extends Error {}
+
+export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void; toolTimeoutMs?: number } = {}) {
   const io = createBridgeIo<unknown>({ write: deps.write });
   const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string }>();
   type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:{id:string;text:string}[];received:Map<string,string>};
@@ -38,13 +43,20 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     const session = sessions.get(threadId)!;
     const id = `optbot-${randomUUID()}`;
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => { pending.delete(id); reject(new Error(`BB tool ${tool} timed out`)); }, 30_000);
+      const timer = setTimeout(() => { pending.delete(id); reject(new ToolTimeout(`BB tool ${tool} timed out`)); }, deps.toolTimeoutMs ?? 30_000);
       pending.set(id, { resolve, reject, timer });
       io.send({ jsonrpc: "2.0", id, method: "item/tool/call", params: { threadId, providerThreadId: session.providerThreadId, turnId: providerTurnId, callId: id, tool, arguments: input } });
     });
   }
+  // A slow or lost reply should not fail the whole turn when the request is safe to repeat.
+  async function callRetrying(threadId: string, tool: string, input: Record<string, unknown>, turn: string, retryable: boolean) {
+    for (let attempt = 1; ; attempt++) {
+      try { return await call(threadId, tool, input, turn); }
+      catch (error) { if (!(error instanceof ToolTimeout) || !retryable || attempt === 3) throw error; }
+    }
+  }
   async function memory(threadId: string, input: Record<string, unknown>, turn: string) {
-    const result = decodeToolCallResponsePayload(await call(threadId, "optbot_chat", input, turn));
+    const result = decodeToolCallResponsePayload(await callRetrying(threadId, "optbot_chat", input, turn, RETRYABLE_MEMORY.has(String(input.action))));
     if (result.isError) throw new Error(result.content);
     return JSON.parse(result.content) as unknown;
   }
@@ -98,7 +110,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       }
       await runOptChatTurn({
         call: (input) => memory(params.threadId, input, providerTurnId), model: !deps.model && options.model.startsWith("bb/") ? bbWorkerModel(async(input)=>{
-          const result=decodeToolCallResponsePayload(await call(params.threadId,"optbot_worker",input,providerTurnId));
+          const result=decodeToolCallResponsePayload(await callRetrying(params.threadId,"optbot_worker",input,providerTurnId,input.action==="poll"));
           if(result.isError)throw new Error(result.content);
           return JSON.parse(result.content);
         }) : model,
