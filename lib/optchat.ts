@@ -198,8 +198,37 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       }
       return result;
     }
-    // Free nodes advance the same readiness frontier without a network slot.
-    for(;;) {const task=candidates().find(task=>bytes(task.source)<=NODE_BYTES);if(!task)break;saveNode(bot,task.start,task.count,task.source);built.set(label(task),task.source);fit(bot);}
+    // Free nodes advance the same readiness frontier without a network slot. Build them smallest level first,
+    // then oldest (as a full rescan would), but from a queue of newly eligible nodes, folding the view in memory:
+    // rescanning the tree and saving the view per free node froze BB for 15 s after a 150-message import.
+    const view=parts(bot), text=(part:Part)=>built.get(label(part));
+    const frontier=()=>view.find(part=>!built.has(label(part)))?.start??total;
+    const end=(part:Part)=>part.count===1?part.start:part.start+part.count;
+    const source=(part:Part)=>{
+      if(part.count===1){const raw=entry(bot,part.start)!;return `${raw.kind}: ${raw.text}`;}
+      const a=built.get(label({start:part.start,count:part.count/2})),b=built.get(label({start:part.start+part.count/2,count:part.count/2}));
+      return a!==undefined&&b!==undefined?`${a}\n${b}`:undefined;
+    };
+    const queue:{part:Part;source:string}[]=[], queued=new Set<string>();
+    const offer=(part:Part,first:number)=>{
+      if(part.start+part.count>total||built.has(label(part))||busy.has(label(part))||queued.has(label(part))||end(part)>first)return;
+      const value=source(part); if(value===undefined||bytes(value)>NODE_BYTES)return;
+      let at=queue.findIndex(item=>item.part.count>part.count||(item.part.count===part.count&&item.part.start>part.start)); if(at<0)at=queue.length;
+      queue.splice(at,0,{part,source:value}); queued.add(label(part));
+    };
+    let first=frontier();
+    for(let size=1;size<=total;size*=2) for(let start=0;start+size<=total;start+=size) offer({start,count:size},first);
+    let changed=false;
+    while(queue.length) {
+      const {part,source:nodeText}=queue.shift()!; queued.delete(label(part));
+      saveNode(bot,part.start,part.count,nodeText); built.set(label(part),nodeText); changed=true;
+      fold(view,total,text);
+      const before=first; first=frontier();
+      const parent={start:part.start-part.start%(part.count*2),count:part.count*2}; offer(parent,first);
+      // A moved frontier makes leaves and parents ending in (before, first] eligible.
+      for(let size=1;size<=total&&first>before;size*=2) for(let start=Math.max(0,Math.floor((before-(size===1?0:size))/size)*size);start+size<=total&&end({start,count:size})<=first;start+=size) if(end({start,count:size})>before)offer({start,count:size},first);
+    }
+    if(changed)saveParts(bot,view);
     return candidates().slice(0,limit).map(task=>({...task,context:contextBefore(bot,task.count===1?task.start:task.start+task.count)}));
   }
   return {
