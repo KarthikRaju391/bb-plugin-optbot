@@ -1,47 +1,43 @@
-# Independent Bots development
+# OptBot development
 
-## OptBot fork (supersedes upstream deployment and memory rules below)
+OptBot extends [Bots Sidebar](https://github.com/tobi/bb-bots-sidebar) by Tobias
+Lütke: it keeps that plugin's sidebar, bot identities, sections, avatars, project
+roles and coordination, and replaces bot memory with Victor Taelin's
+[OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449).
+It is a separate plugin (runtime ID `optbot`); it never reads or changes an
+installed Bots Sidebar's data.
 
-This checkout is the separate `optbot` plugin, not the installed Bots Sidebar.
-Never edit, reload, disable, migrate, or import the live `bots-sidebar` plugin
-without explicit user approval. Preserve its sidebar UX in this independent fork.
-Per-bot OptChat logs and summary trees are canonical in private daily JSONL streams
-under `chat/<bot-id>/main/` and `tree/`; SQLite holds indexes and BB metadata.
-The inherited memory field is optional pinned context, not history. Follow the
-exact linked replication spec, including background eight-job compaction,
-incremental never-split views, settled-only model reads, and cache-stable headers.
-Master adapters use OpenAI Responses/Anthropic Messages, not a Claude CLI session.
-New bot conversations must use the `optbot` provider. Tools and CLI are namespaced
-to avoid collisions. Build and test here; do not commit or push unless asked.
-Keep new functional harnesses local. Read README.md for runtime limitations.
+## Memory contract (OptChat)
 
-Work on `main` in the installed Bots Sidebar source checkout. Confirm its path
-with `bb plugin list` before editing. Do not edit or reload older personal-workspace
-worktrees. Build and reload `bots-sidebar` from this checkout; verify the installed
-source before deploying. The owner requested private, ID-keyed state,
-not bot-home projects or special execution directories. Explicit user-created
-work projects are allowed, but never create a backing project for bot storage.
-Keep all UX refinements intact.
-A code-only downgrade is not a data rollback: preserve the plugin DB backup before
-restoring an older metadata format.
+- Canonical per-bot log and summary tree: daily JSONL under `chat/<bot-id>/main/`
+  and `tree/`, append-only and fsynced. SQLite holds indexes and BB metadata only.
+  Never edit or delete history.
+- Follow the spec: purely binary tree, free verbatim nodes, a tool-less compactor
+  with the verbatim COMPACT prompt (512-byte lines, 8 jobs, 10 s retry, shortest
+  try kept), an incremental never-split view fold, and turns that start only on a
+  settled view.
+- Prompts: MASTER and VIEW_DOC verbatim (VIEW_DOC adapted only for the
+  `optbot_memory` tool call syntax). The agent's memory tools are the spec's
+  `zoom` and `date` only.
+- Plugin code runs on BB's server event loop. Never do synchronous work per
+  message across the whole history (fold the view in memory and save once).
 
-Private state design: use the plugin SQLite database as the durable authority,
-with private per-bot Markdown/JSON exports under its own data directory. Embed
-identity/instructions/memory into agent context; tools infer bot ID from explicit
-thread bindings. Ordinary bot chats use the personal project with a normal personal
-workspace. No new backing projects, no state files in user repositories. Preserve
-existing conversation histories and track legacy home project IDs for compatibility.
+## Execution
 
-## Plugin identity
+- Each turn is a fresh hidden BB thread on the provider and model stored on the
+  conversation as `bb/<provider>/<model>`, with Full access. The conversation's
+  composer picker lists those models; the `optbot` provider stays out of BB's
+  global picker via `experimental_visibility: "installed"` and a `not_installed`
+  health answer.
+- Tools and CLI are namespaced (`optbot_*`, `bb optbot`, mention provider
+  `optbots`).
 
-- Runtime ID: `bots-sidebar`; package: `bb-plugin-bots-sidebar`; display name:
-  Bots Sidebar. The sidebar heading can remain Bots.
-- `bots` is another marketplace plugin's ID. Do not add a runtime alias or read
-  its private directory/KV automatically. Our old local namespace was migrated
-  explicitly with backups. Historical thread origin IDs remain unchanged; durable
-  bindings identify our old conversations. New starts must use `bb.pluginId`.
-- Keep native tool names, SQL table names, RPC names, and existing `bots:` client
-  preference/composer-draft keys stable. They are not runtime plugin identities.
+## Working here
+
+- `npm test`, `npm run typecheck`, `bb plugin build`. Keep functional harnesses and
+  experiment data in `.local/` (gitignored); commit only product code and tests.
+- Deploy with `bb plugin build . && bb plugin reload optbot`, only while no OptBot
+  turn is running: a reload stops in-flight workers.
 
 ## Data and state contract
 
@@ -69,17 +65,15 @@ existing conversation histories and track legacy home project IDs for compatibil
   private exports, not a second write interface or runtime working directory.
 - Editing a bot must not rename or relocate linked projects. Native tools act
   only on the current bot and should not expose storage paths to the agent.
-- `bot_update_state` is the durable-write tool: always require target + action.
-  Identity/set requires a fresh revision. Memory is at most 3000 characters on every
-  write; append/forget operates on exact single-line facts. Memory overwrite requires
-  content + expectedSha256 from a fresh read, and never retries whole-document bytes
-  against a newer hash. Overflow errors explain read/condense/overwrite. Preserve
-  older oversized memories for reading and explicit compaction; settings set/unset only changes selected top-level keys;
+- `optbot_update_state` is the durable-write tool: always require target + action.
+  Identity/set requires a fresh revision. The inherited `memory` (pinned context)
+  target is retired: both state tools refuse it, because the OptChat history is the
+  memory. Settings set/unset only changes selected top-level keys;
   project join/leave/own/release changes membership/ownership atomically, never
   project files or historical conversation bindings. Reapply semantic edits on bounded CAS
   retries, never retry stale whole-file bytes. No shared-memory scope or routines.
 
-# Bots sidebar UX contract
+# Sidebar UX contract (inherited from Bots Sidebar)
 
 Preserve the approved interaction model below. An older source snapshot once
 reintroduced removed controls during development. Do not restore old snapshots
@@ -126,13 +120,13 @@ or reintroduce hover toolbars when making unrelated changes.
   retain drafts on conflict. Explicitly creating a project happens immediately,
   then drafts Owner membership for the bot's Save. Cancelling a bot must not delete
   an explicitly created project or discard its files; explain this in the UI.
-- Bot context contains fixed guidance + SOUL.md + MEMORY.md (full compliant memory).
-  Per-bot AGENTS.md is retired; preserve historical text as inactive private data,
-  never inject it or offer it as an editable state file. Workspace AGENTS.md still applies.
-- Edit bot is the single editor: Instructions has SOUL.md, State has
-  MEMORY.md / settings.json. Do not restore a separate View bot state action.
-  Save all changed fields atomically with the original revision and per-file hashes;
-  invalid JSON/conflicts keep every draft and never partially save identity/state.
+- Bot context contains fixed guidance + SOUL.md. MEMORY.md (pinned context) and
+  per-bot AGENTS.md are retired: keep stored text as inactive private data, never
+  inject it or offer it as an editable state file. Workspace AGENTS.md still applies.
+- Edit bot is the single editor: Setup, Instructions (SOUL.md), Memory (read-only
+  OptChat inspector), Projects, Appearance. There is no State tab. Save all changed
+  fields atomically with the original revision and hashes; conflicts keep every
+  draft and never partially save identity.
 - New bot drafts randomize color, shape, expression, and idle motion ONCE. Existing
   bots and rerenders never reroll. Offer Randomize appearance explicitly. Presets
   and random defaults are chromatic; no black/white/cream/gray (including migration

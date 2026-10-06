@@ -47,23 +47,8 @@ it("exposes object-root native schemas with target/action required", async () =>
 it("accepts provider-supplied nulls for unused fields without treating them as edits", async () => {
   const { update, read } = await scope();
   const unused = { expectedRevision: null, name: null, role: null, soul: null, content: null, expectedSha256: null, values: null, keys: null, projectId: null };
-  const result = await update({ target: "memory", action: "append", fact: "A real-provider fact.", ...unused });
-  expect(result.state.facts).toEqual(["A real-provider fact."]);
   await update({ ...unused, target: "settings", action: "set", fact: null, values: { nullablePreference: null } });
   expect((await read("settings")).state.values).toEqual({ nullablePreference: null });
-});
-
-it("appends, deduplicates, and forgets exact memory facts", async () => {
-  const { bot, read, update } = await scope();
-  expect((await read("memory")).state.facts).toEqual([]);
-  const first = await update({ target: "memory", action: "append", fact: "Prefer small changes." });
-  expect(first).toMatchObject({ botId: bot.id, target: "memory", changed: true });
-  expect(first.state.facts).toEqual(["Prefer small changes."]);
-  expect((await update({ target: "memory", action: "append", fact: "Prefer small changes." })).changed).toBe(false);
-  await update({ target: "memory", action: "append", fact: "Prefer small changes. Review them carefully." });
-  const forgotten = await update({ target: "memory", action: "forget", fact: "Prefer small changes." });
-  expect(forgotten.state.facts).toEqual(["Prefer small changes. Review them carefully."]);
-  expect((await update({ target: "memory", action: "forget", fact: "Missing fact." })).changed).toBe(false);
 });
 
 it("preserves freeform notes and original line endings when forgetting facts", () => {
@@ -71,21 +56,6 @@ it("preserves freeform notes and original line endings when forgetting facts", (
   const next = mutateStateDocument(text, { target: "memory", action: "forget", fact: "One fact." });
   expect(next).toBe("# Memory\r\n\r\nA freeform note.\r\n- One fact. More detail.\r\n");
   expect(memoryFacts(next)).toEqual(["One fact. More detail."]);
-});
-
-it("retries semantic memory edits against newer bytes without losing unrelated facts", async () => {
-  const { host, bot, update } = await scope(); let raced = false;
-  racing.update = (store, id, file) => { if (!raced && file === "MEMORY.md") { raced = true; concurrentState(store, id, file, "- Concurrent fact.\n"); } };
-  const result = await update({ target: "memory", action: "append", fact: "My fact." });
-  expect(result.state.facts).toEqual(["Concurrent fact.", "My fact."]);
-  expect(host.store.require(bot.id).memory).toBe("- Concurrent fact.\n- My fact.\n");
-});
-
-it("bounds retries when an external writer keeps changing state", async () => {
-  const { host, update } = await scope(); let writes = 0;
-  racing.update = (store, id, file) => { if (file === "MEMORY.md") concurrentState(store, id, file, `- Concurrent ${++writes}.\n`); };
-  await expect(update({ target: "memory", action: "append", fact: "My fact." })).rejects.toThrow(/changed/);
-  expect(writes).toBe(3);
 });
 
 it("sets/unsets only selected settings and preserves concurrent keys", async () => {
@@ -130,7 +100,7 @@ it("joins/leaves projects without moving projects, files, or existing conversati
   expect((await update({ target: "project", action: "leave", projectId: "project" })).changed).toBe(false);
   expect(host.harness.inspection.sdk.callsTo("projects.create")).toHaveLength(0);
   expect(host.harness.inspection.sdk.callsTo("projects.update")).toEqual([]);
-  expect((await read("memory")).botId).toBe(bot.id); // Existing conversation keeps its bot.
+  expect((await read("identity")).botId).toBe(bot.id); // Existing conversation keeps its bot.
   await expect(update({ target: "project", action: "join", projectId: PERSONAL_ID })).rejects.toThrow(/existing work project/);
 });
 
@@ -145,57 +115,17 @@ it("limits mutations to the current bot and rejects invalid target/action shapes
     { target: "settings", action: "set", values: {} },
     { target: "settings", action: "set", values: JSON.parse('{"__proto__": {"polluted":true}}') },
     { target: "project", action: "join" },
-    { target: "memory", action: "append", fact: "x", botId: other.id },
+    { target: "settings", action: "set", values: { a: 1 }, botId: other.id },
   ]) await expect(update(change)).rejects.toThrow();
-  await update({ target: "memory", action: "append", fact: "Only Atlas knows this." });
-  expect(host.store.require(bot.id).memory).toContain("Only Atlas knows this.");
-  expect(host.store.require(other.id).memory).toBe("");
+  await update({ target: "settings", action: "set", values: { onlyAtlas: true } });
+  expect(host.store.require(bot.id).settings).toMatchObject({ onlyAtlas: true });
+  expect(host.store.require(other.id).settings).not.toHaveProperty("onlyAtlas");
 });
 
-it("allows exactly 3000 memory characters and rejects overflow with compaction instructions", async () => {
-  const { bot, host, read, update } = await scope();
-  const first = await update({ target: "memory", action: "overwrite", content: "x".repeat(2995), expectedSha256: (await read("memory")).state.sha256 });
-  expect(first.state.characters).toBe(2995);
-  const full = await update({ target: "memory", action: "append", fact: "a" }); // newline + '- a\n'
-  expect(full.state).toMatchObject({ characters: 3000, maxCharacters: 3000 });
-  const before = host.store.require(bot.id);
-  await expect(update({ target: "memory", action: "append", fact: "b" })).rejects.toThrow(/3000.*optbot_read_state.*overwrite.*expectedSha256/);
-  expect(host.store.require(bot.id)).toEqual(before);
-  await expect(update({ target: "memory", action: "overwrite", content: "x".repeat(3001), expectedSha256: full.state.sha256 })).rejects.toThrow(/3000.*optbot_read_state.*overwrite/);
-  expect(host.store.require(bot.id)).toEqual(before);
-});
 
-it("overwrites only the memory read, supports clearing, and requires a fresh hash", async () => {
-  const { read, update } = await scope();
-  const old = await read("memory");
-  await update({ target: "memory", action: "append", fact: "Newer fact" });
-  await expect(update({ target: "memory", action: "overwrite", content: "Lost fact", expectedSha256: old.state.sha256 })).rejects.toThrow(/Memory changed.*optbot_read_state/);
-  await expect(update({ target: "memory", action: "overwrite", content: "Missing hash" })).rejects.toThrow(/expectedSha256/);
-  const latest = await read("memory");
-  expect((await update({ target: "memory", action: "overwrite", content: latest.state.content, expectedSha256: latest.state.sha256 })).changed).toBe(false);
-  const cleared = await update({ target: "memory", action: "overwrite", content: "", expectedSha256: latest.state.sha256 });
-  expect(cleared.state).toMatchObject({ content: "", characters: 0, facts: [] });
-});
-
-it("never retries a whole-memory overwrite after a concurrent write", async () => {
-  const { bot, host, read, update } = await scope();
-  const old = await read("memory");
-  const competing = vi.fn((store, id, file) => concurrentState(store, id, file, "- Concurrent fact.\n"));
-  racing.update = competing;
-  await expect(update({ target: "memory", action: "overwrite", content: "Stale condensed text", expectedSha256: old.state.sha256 })).rejects.toThrow(/changed/);
-  expect(competing).toHaveBeenCalledOnce();
-  expect(host.store.require(bot.id).memory).toBe("- Concurrent fact.\n");
-});
-
-it("keeps oversized legacy memory readable until a compliant overwrite, without losing archived instructions", async () => {
-  const { bot, host, read, update } = await scope();
-  host.store.save({ ...host.store.require(bot.id), memory: "L".repeat(9000), agents: "Archived custom operating rules" });
-  await host.reload();
-  const legacy = await read("memory");
-  expect(legacy.state).toMatchObject({ characters: 9000, maxCharacters: 3000, content: "L".repeat(9000) });
-  expect((await read("identity")).state).not.toHaveProperty("agents");
-  await expect(update({ target: "memory", action: "append", fact: "New fact" })).rejects.toThrow(/3000.*overwrite/);
-  await update({ target: "memory", action: "overwrite", content: "- Condensed legacy memory.\n", expectedSha256: legacy.state.sha256 });
-  expect(host.store.require(bot.id)).toMatchObject({ agents: "Archived custom operating rules", memory: "- Condensed legacy memory.\n" });
-  await expect(update({ target: "identity", action: "set", expectedRevision: host.store.require(bot.id).updatedAt, agents: "Retired edit" })).rejects.toThrow();
+it("retires pinned context for agents: the conversation history is the memory", async () => {
+  const { host, read, update } = await scope();
+  await expect(read("memory")).rejects.toThrow(/history is your memory/);
+  await expect(update({ target: "memory", action: "append", fact: "Remember this." })).rejects.toThrow(/history is your memory/);
+  for (const tool of host.harness.inspection.registrations.agentTools) expect(tool.description).not.toMatch(/pinned context/i);
 });

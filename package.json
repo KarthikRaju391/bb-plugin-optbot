@@ -1,6 +1,7 @@
 {
   "name": "bb-plugin-optbot",
   "version": "0.1.0",
+  "description": "OptBot extends Bots Sidebar: each bot remembers its whole conversation history as an OptChat summary tree and starts every turn fresh.",
   "type": "module",
   "private": true,
   "scripts": {
@@ -14,14 +15,16 @@
   },
   "bb": {
     "name": "OptBot",
-    "description": "Specialist bots with per-bot OptChat history, navigable memory trees, and fresh context every turn.",
+    "description": "Extends Bots Sidebar: each bot keeps its whole conversation history as an OptChat summary tree and starts every turn fresh from it.",
     "branding": {
       "icon": "./assets/bot.svg"
     },
     "server": "./server.ts",
     "host": "./host.ts",
     "app": "./app.tsx",
-    "skills": ["./skills/optbot"]
+    "skills": [
+      "./skills/optbot"
+    ]
   },
   "dependencies": {
     "@get-bb/plugin-sdk": "0.5.29",
@@ -30,7 +33,6 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-
     "@pierre/diffs": "^1.2.9",
     "@radix-ui/react-alert-dialog": "^1.1.19",
     "@radix-ui/react-context-menu": "^2.3.3",

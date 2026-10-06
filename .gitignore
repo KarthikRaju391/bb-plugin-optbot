@@ -1,3 +1,6 @@
 node_modules
 .npm-cache
 dist
+.local/
+.local-test-results.json
+integrations/

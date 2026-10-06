@@ -18,6 +18,8 @@ import { createBbWorkers, workerInput } from "./lib/bb-workers";
 import { bbModelRef } from "./runtime/bb";
 import { memoryCommands } from "./lib/memory-operations";
 export { rpcContract, avatarSchema } from "./contract";
+// OptChat: the conversation history is the memory. The inherited pinned-context field is no longer shown to agents.
+const RETIRED_PINNED_CONTEXT = "Pinned context (MEMORY.md) is retired in OptBot: your conversation history is your memory. It is recorded automatically; use optbot_memory to zoom into it.";
 export type { BotAvatar, BotMetadata, BotSection, ProjectCreateInput } from "./contract";
 
 const CHANGED = "project-bots-changed";
@@ -240,22 +242,25 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.agents.registerTool({
-    name: "optbot_read_state", description: "Read this bot's identity, pinned context, settings, or linked projects. Use optbot_memory for conversation history.",
+    name: "optbot_read_state", description: "Read this bot's identity, settings, or linked projects. Your memory is the conversation history: use optbot_memory to zoom into it.",
     instructions: BOT_GUIDANCE,
     parameters: stateReadSchema,
     execute: async (input, ctx) => {
       const botId = await resolveOwner(ctx.threadId);
       if (!botId) throw new Error("This conversation is not assigned to a bot");
+      if (input.target === "memory") throw new Error(RETIRED_PINNED_CONTEXT);
       return JSON.stringify(await readBotState(botId, input, ctx.projectId));
     },
   });
   bb.agents.registerTool({
-    name: "optbot_update_state", description: "Update identity, pinned context, settings or project membership. Requires target and action. Identity needs a fresh expectedRevision; pinned-context overwrite needs expectedSha256. Conversation history is automatic and append-only; never condense it into pinned context.",
+    name: "optbot_update_state", description: "Update identity, settings or project membership. Requires target and action. Identity needs a fresh expectedRevision. There is no separate memory to write: the conversation history is your memory and is recorded automatically.",
     parameters: stateMutationToolSchema,
     execute: async (change, ctx) => {
       const botId = await resolveOwner(ctx.threadId);
       if (!botId) throw new Error("This conversation is not assigned to a bot");
-      return JSON.stringify(await applyBotState(botId, stateMutationSchema.parse(normalizeStateMutation(change))));
+      const mutation = stateMutationSchema.parse(normalizeStateMutation(change));
+      if (mutation.target === "memory") throw new Error(RETIRED_PINNED_CONTEXT);
+      return JSON.stringify(await applyBotState(botId, mutation));
     },
   });
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
@@ -361,7 +366,7 @@ export default async function plugin(bb: BbPluginApi) {
         const bot = await state.prepare(botId);
         await validateConversationProject(bot, request.projectId);
         const token = randomUUID(); store.stageStart(token, botId, request.projectId);
-        const thread = await bb.sdk.threads.spawn({ ...request, input: [...request.input, { type: "text", text: `[bb-bot-start:${token}]\nThis conversation belongs to OptBot ${bot.name}. Its history is recorded automatically; use optbot_memory to navigate it. Identity and pinned context are managed by optbot_read_state / optbot_update_state.`, mentions: [], visibility: "agent-only" }] });
+        const thread = await bb.sdk.threads.spawn({ ...request, input: [...request.input, { type: "text", text: `[bb-bot-start:${token}]\nThis conversation belongs to OptBot ${bot.name}. Its history is recorded automatically; use optbot_memory to navigate it. Identity is managed by optbot_read_state / optbot_update_state.`, mentions: [], visibility: "agent-only" }] });
         store.bind(thread.id, botId); store.cancelStart(token);
         if (makeMain || !store.require(botId).mainThreadId) { const latest = store.require(botId); store.save({ ...latest, mainThreadId: thread.id, updatedAt: nextTimestamp(latest.updatedAt) }); }
         publish(); return { threadId: thread.id };

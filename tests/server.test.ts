@@ -108,12 +108,12 @@ describe("private state data", () => {
     const host = await setup(); const bot = await host.create();
     const created = await host.harness.behavior.callRpc("conversation_create", { botId: bot.id, request: request() }) as { threadId: string };
     host.offline.add("host-home"); const ctx = { threadId: created.threadId, projectId: "project" };
-    const before = asJSON(await host.harness.behavior.callAgentTool("optbot_read_state", { target: "memory" }, ctx));
-    expect(before.state.sha256).toBe(hash("")); expect(before.state).not.toHaveProperty("path");
-    const result = asJSON(await host.harness.behavior.callAgentTool("optbot_update_state", { target: "memory", action: "append", fact: "Prefer focused changes." }, ctx));
-    expect(result.state.sha256).toBe(hash("- Prefer focused changes.\n"));
+    const before = asJSON(await host.harness.behavior.callAgentTool("optbot_read_state", { target: "settings" }, ctx));
+    expect(before.state).not.toHaveProperty("path");
+    const result = asJSON(await host.harness.behavior.callAgentTool("optbot_update_state", { target: "settings", action: "set", values: { style: "focused" } }, ctx));
+    expect(result.state.values).toMatchObject({ style: "focused" });
     expect(result.state).not.toHaveProperty("path");
-    expect(await readFile(join(host.stateDirectory(bot.id), "MEMORY.md"), "utf8")).toBe("- Prefer focused changes.\n");
+    expect(JSON.parse(await readFile(join(host.stateDirectory(bot.id), "settings.json"), "utf8"))).toMatchObject({ style: "focused" });
     expect(host.harness.inspection.sdk.callsTo("files.write")).toEqual([]);
     expect(host.harness.inspection.sdk.callsTo("hosts.directory")).toEqual([]);
     const identity = asJSON(await host.harness.behavior.callAgentTool("optbot_read_state", { target: "identity" }, ctx));
