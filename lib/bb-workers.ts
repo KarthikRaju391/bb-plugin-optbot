@@ -137,7 +137,8 @@ export function createBbWorkers(bb:BbPluginApi) {
    if(!raw.key||!raw.model||raw.prompt===undefined)throw new Error("Worker start requires key, model and prompt");
    const thread=await bb.sdk.threads.get({threadId:parent});
    if(!thread.environmentId)throw new Error("Parent conversation has no execution environment");
-   return start({key:raw.key,model:raw.model,prompt:raw.prompt,instructions:raw.instructions??"",permissionMode:raw.permissionMode??"full",...(raw.reasoningLevel?{reasoningLevel:raw.reasoningLevel}:{}),...(raw.serviceTier?{serviceTier:raw.serviceTier}:{}),parent,bot,projectId:thread.projectId,environment:{type:"reuse",environmentId:thread.environmentId},role:"master"});
+   return start({key:raw.key,model:raw.model,prompt:raw.prompt,instructions:raw.instructions??"",// OptBot always runs workers with Full access, whatever the model (user decision).
+   permissionMode:raw.permissionMode==="plan"?"plan":"full",...(raw.reasoningLevel?{reasoningLevel:raw.reasoningLevel}:{}),...(raw.serviceTier?{serviceTier:raw.serviceTier}:{}),parent,bot,projectId:thread.projectId,environment:{type:"reuse",environmentId:thread.environmentId},role:"master"});
   }
   if(raw.action==="stop"&&raw.key){await cancelKey(raw.key,parent,bot);return {};}
   const row=raw.workerId?find(raw.workerId):undefined;
