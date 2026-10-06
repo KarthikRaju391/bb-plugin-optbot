@@ -116,7 +116,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   function receipts(bot:string){if(options.archive)return options.archive.receipts(bot);let values=temporaryInbox.get(bot);if(!values)temporaryInbox.set(bot,values=new Map());return values;}
   function receive(bot:string,threadId:string,id:string,parentId:string,text:string){const value={id,parentId,threadId,text,date:new Date(now()).toISOString()};if(options.archive)return options.archive.receive(bot,value);const old=receipts(bot).get(id);if(old){if(old.text!==text||old.threadId!==threadId)throw new Error("Conflicting duplicate queued input");return old;}receipts(bot).set(id,value);return value;}
   function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId)append(bot,row.threadId,`${row.id}:input`,"user",row.text,row.date);}
-  function append(bot: string, threadId: string, key: string, kind: MemoryKind, text: string, receivedDate?:string) {
+  function append(bot: string, threadId: string, key: string, kind: MemoryKind, text: string, receivedDate?:string, foldView = true) {
     const old = db.prepare("SELECT idx,kind,text,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, key) as Entry | undefined;
     if (old) {
       if (old.kind !== kind || old.text !== text || old.threadId !== threadId) throw new Error("Conflicting duplicate memory event");
@@ -125,7 +125,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     const idx = count(bot), date = receivedDate??new Date(now()).toISOString();
     options.archive?.appendMain(bot,{ i: idx, kind, text, size: bytes(`${kind}: ${text}`), date, eventKey: key, threadId });
     db.prepare("INSERT INTO optchat_log VALUES (?,?,?,?,?,?,?)").run(bot, idx, key, kind, text, date, threadId);
-    const view = parts(bot); view.push({ start: idx, count: 1 }); saveParts(bot, view); fit(bot);
+    if (foldView) { const view = parts(bot); view.push({ start: idx, count: 1 }); saveParts(bot, view); fit(bot); }
     return idx;
   }
   function requireLease(bot: string, threadId: string, lease: string) {
@@ -220,7 +220,13 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const stored=new Set((db.prepare("SELECT start,count FROM optchat_nodes WHERE bot_id=?").all(bot) as Part[]).map(row=>`${Math.log2(row.count)}:${row.start/row.count}`));
       for(const tree of trees)stored.add(`${tree.l}:${tree.i}`);
       for(const tree of trees)if(tree.l>0&&(!stored.has(`${tree.l-1}:${tree.i*2}`)||!stored.has(`${tree.l-1}:${tree.i*2+1}`)))throw new Error("Imported subtree is missing its stored children");
-      for(const row of planned)append(bot,row.threadId,row.eventKey,row.kind,row.text,row.date);
+      // Same incremental fold as appending one by one, but in memory with one save: a per-row save froze BB on long imports.
+      db.transaction(()=>{
+        const view=parts(bot), texts=new Map((db.prepare("SELECT start,count,text FROM optchat_nodes WHERE bot_id=?").all(bot) as (Part&{text:string})[]).map(row=>[label(row),row.text]));
+        const lookup=(part:Part)=>texts.get(label(part));let used=view.reduce((sum,part)=>sum+partBytes(part,lookup),0);
+        for(const row of planned){const idx=append(bot,row.threadId,row.eventKey,row.kind,row.text,row.date,false);const leaf={start:idx,count:1};view.push(leaf);used=fold(view,idx+1,lookup,used+partBytes(leaf,lookup));}
+        saveParts(bot,view);
+      })();
       for(const tree of trees){const n=2**tree.l,start=tree.i*n;if(node(bot,{start,count:n})===undefined)saveNode(bot,start,n,tree.text);}
       fit(bot);return {imported:planned.length,entries:count(bot)};
     },
