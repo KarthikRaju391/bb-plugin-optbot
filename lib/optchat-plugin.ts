@@ -5,7 +5,8 @@ import { openArchive } from "./archive";
 import { dirname, join } from "node:path";
 import { acquireCompactor, compactNode } from "./compactor";
 import { modelRef } from "../runtime/models";
-import { bbModelRef, bbWorkerModel } from "../runtime/bb";
+import { modelHostContract } from "../runtime/host-contract";
+import { codexRef } from "../runtime/codex";
 import type { createBbWorkers } from "./bb-workers";
 
 export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>) {
@@ -14,9 +15,8 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   const archive = await openArchive(root, message=>bb.log.warn(message));
   const chat = createOptChat(db, { archive });
   const settings=bb.settings.define({
-    compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/<installed-provider-id>[/<model>] delegates to BB with its existing authentication and routing."},
-    compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine for hidden BB summarization workers. No separate API key is required."},
-    allowNativeSummaryTools:{type:"boolean",label:"Allow native tools during background summarization",default:false,description:"Explicit opt-in: BB worker APIs do not enforce text-only execution. Historical text can influence native tools. Keep off unless this risk is acceptable."},
+    compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex or bb/codex/<model>: a tool-less text call through the host's existing Codex login (no API key). Prefer a small model; it runs at medium effort."},
+    compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine with an authenticated Codex login. No separate API key is required."},
     compactorApiKey:{type:"string",label:"Compactor API key",secret:true,description:"Used only by the always-on backend; never sent to the agent or stored in its history."},
     compactorEndpoint:{type:"string",label:"Optional compactor API base URL",description:"Leave empty for the provider's standard endpoint. HTTPS is required except on loopback."},
   });
@@ -28,37 +28,15 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     if (typeof compactorHost!=="string" || !compactorHost) throw new Error("Select the BB machine in OptBot's compactorHost setting");
     return compactorHost;
   }
-  async function nativeCompact(task: Parameters<typeof compactNode>[0], options: Parameters<typeof compactNode>[1]) {
-    return compactNode(task, options, (prompt, config) => {let dialogue=prompt;return {
-      async ask(feedback) {
-        if(feedback)dialogue+=`\n\nUser feedback:\n${feedback}`;
-        const model=bbWorkerModel(async input=>{
-          if(input.action==="start") {
-            const personal=(await bb.sdk.projects.list({includePersonal:true})).find(project=>project.kind==="personal");
-            if(!personal)throw new Error("BB personal project is unavailable");
-            config.signal.throwIfAborted();
-            return workers.start({key:String(input.key),model:config.model,prompt:String(input.prompt),instructions:config.system,permissionMode:"full",parent:null,bot:null,projectId:personal.id,environment:{type:"host",hostId:await nativeHostId(),workspace:{type:"personal"}},role:"summary"});
-          }
-          if(input.action==="poll")return workers.poll(String(input.workerId),input.cursor as string|undefined);
-          if(input.action==="stop"){if(input.workerId)await workers.stop(String(input.workerId));else await workers.cancelKey(String(input.key),null,null);return {};}
-          throw new Error("Summarization workers cannot steer");
-        });
-        const text=await model.summarize(dialogue,{cwd:"",model:config.model,env:{},instructions:config.system,signal:config.signal,permissionMode:"full"});
-        dialogue+=`\n\nAssistant candidate:\n${text}`;
-        return {text,thoughts:[],calls:[]};
-      }, addUser(){}, addResult(){},
-    };});
-  }
+  const modelHost=bb.hosts.experimental_client({contract:modelHostContract});
   const worker=await acquireCompactor(root,{chat,report:message=>bb.log.warn(message),async compact(task,options){
     if (!options.model.startsWith("bb/")) return compactNode(task, options);
-    bbModelRef(options.model);
-    const {allowNativeSummaryTools}=await settings.get();
-    if(allowNativeSummaryTools!==true)throw new Error("Native background compaction is paused: BB cannot enforce tool-free summarization. Explicitly approve allowNativeSummaryTools or select a text-only API summarizer.");
-    return nativeCompact(task,options);
+    codexRef(options.model);
+    return modelHost.call("compact",{task,model:options.model},{hostId:await nativeHostId(),signal:options.signal});
   },async options(signal){
     const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base}=await settings.get();
     const model=typeof selected==="string"&&selected?selected:"bb/codex";
-    if(model.startsWith("bb/")) {bbModelRef(model);return {model,env:{},signal,system:""};}
+    if(model.startsWith("bb/")) {codexRef(model);return {model,env:{},signal,system:""};}
     const provider=modelRef(model).provider;
     const env={...process.env};
     if(typeof credential==="string"&&credential) env[provider==="openai"?"OPENAI_API_KEY":"ANTHROPIC_API_KEY"]=credential;
@@ -104,12 +82,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
         case "heartbeat": result = chat.heartbeat(bot, ctx.threadId, lease()); break;
         case "settled": {
           chat.heartbeat(bot,ctx.threadId,lease());
-          const settled=chat.settled(bot);
-          if(!settled) {
-            const {compactorModel,allowNativeSummaryTools}=await settings.get();
-            if(typeof compactorModel==="string"&&compactorModel.startsWith("bb/")&&allowNativeSummaryTools!==true)throw new Error("Memory compaction is paused: enable allowNativeSummaryTools in OptBot settings to permit native background summaries, or choose a text-only API summarizer. Original history is retained.");
-          }
-          result={settled}; break;
+          result={settled:chat.settled(bot)}; break;
         }
         case "checkpoint": result = chat.checkpoint(bot, ctx.threadId, lease(), required(input.text, "text")); break;
         case "record": result = chat.record(bot, ctx.threadId, lease(), required(input.key, "key"), required(input.kind, "kind"), required(input.text, "text")); break;
@@ -140,8 +113,8 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   });
   async function checkModel() {
     const {compactorModel}=await settings.get(), model=compactorModel || "bb/codex";
-    bbModelRef(model); const hostId=await nativeHostId();
-    const summary=await nativeCompact({start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."},{model,env:{},system:"",signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)])});
+    codexRef(model); const hostId=await nativeHostId();
+    const summary=await modelHost.call("compact",{model,task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)])});
     return {model,hostId,summary};
   }
   return {...chat,wake:pump,checkModel};

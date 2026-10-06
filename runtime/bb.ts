@@ -1,5 +1,6 @@
 import {randomUUID} from "node:crypto";
 import type {ModelBoundary,ModelEvent,ModelOptions} from "./turn";
+import {MASTER,BB_VIEW_DOC} from "./prompts";
 
 export function bbModelRef(value:string) {
  const match=/^bb\/([a-z0-9-]+)(?:\/(.+))?$/.exec(value);
@@ -14,7 +15,7 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
    bbModelRef(options.model); options.signal.throwIfAborted();
    const key=randomUUID();let workerId:string|undefined,cursor:string|undefined;
    try {
-    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:options.instructions,permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
+    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:[MASTER,BB_VIEW_DOC,options.instructions].filter(Boolean).join("\n\n"),permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
     for(;;) {
      options.signal.throwIfAborted();
      const incoming=options.incoming?.()??[];
@@ -47,13 +48,9 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
     catch { /* Durable optbot_workers cleanup_pending records retain diagnostics/handles. */ }
    }
   },
-  async summarize(prompt,options) {
-   let text="";
-   for await(const event of this.stream(prompt,{...options,tools:[]})) {
-    if(event.kind==="echo"&&event.error)throw new Error(event.text);
-    if(event.kind==="result"){if(!event.success)throw new Error(event.text);text=event.text;}
-   }
-   return text;
+  async summarize() {
+   // Summaries need a tool-less text call (§4.2); BB worker threads are full agents.
+   throw new Error("BB worker threads do not summarize; use the bb/codex text-only compactor");
   },
  };
 }

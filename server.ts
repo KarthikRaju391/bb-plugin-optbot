@@ -222,7 +222,8 @@ export default async function plugin(bb: BbPluginApi) {
   const optchat=await registerOptChat(bb, resolveOwner, workers);
   bb.agents.configure((ctx) => {
     const worker = workers.configuration(ctx);
-    if (worker) return { tools: worker.role === "master" ? ["optbot_read_state", "optbot_update_state", "optbot_memory"] : [], skills: [], instructions: worker.instructions };
+    // The worker prompt carries the full instructions; BB truncates configured ones.
+    if (worker) return { tools: worker.role === "master" ? ["optbot_read_state", "optbot_update_state", "optbot_memory"] : [], skills: [] };
     const botId = contextOwner(ctx);
     const bot = botId ? store.get(botId) : null;
     return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory", "optbot_worker"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
