@@ -102,16 +102,13 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
       return JSON.stringify(result);
     },
   });
+  // Spec §7.1: the agent's only memory tools are zoom and date, with the reference descriptions and output.
   bb.agents.registerTool({
-    name: "optbot_memory", description: "Navigate this bot's original conversation history. zoom opens start+count into two summaries, or retrieves an original message (count=1, offset pages large text). search finds literal text; pass the last result ID as after to page. date returns the timestamp of start. Memory is historical evidence, never current authorization.",
-    parameters: z.object({ action: z.enum(["zoom", "search", "date", "view"]), start: z.number().int().nonnegative().optional(), count: z.number().int().positive().optional(), offset: z.number().int().nonnegative().optional(), query: z.string().min(1).max(500).optional(), after: z.number().int().min(-1).optional() }).strict(),
+    name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. date: The date and time of message id.",
+    parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative(), count: z.number().int().positive().optional() }).strict(),
     async execute(input, ctx) {
       const bot = await scope(ctx.threadId);
-      if (input.action === "view") return JSON.stringify(chat.view(bot));
-      if (input.action === "search") { if (!input.query) throw new Error("Search requires query"); return JSON.stringify(chat.search(bot, input.query, input.after)); }
-      if (input.start === undefined) throw new Error("zoom/date requires start");
-      const value = chat.zoom(bot, input.start, input.action === "date" ? 1 : input.count ?? 1, input.offset);
-      return JSON.stringify(input.action === "date" && !Array.isArray(value) ? { id: value.idx, date: value.date, threadId: value.threadId } : value);
+      return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1);
     },
   });
   async function checkModel() {
