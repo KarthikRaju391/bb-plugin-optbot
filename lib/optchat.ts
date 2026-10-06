@@ -46,7 +46,9 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     options.archive?.appendTree(bot, { l: Math.log2(count), i: start/count, text, size: bytes(text) });
     db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,count,text);
   }
-  function hydrate(bot: string) {
+  // One transaction: importing a cold cache row by row would fsync every insert.
+  function hydrate(bot: string) { db.transaction(() => hydrateNow(bot))(); }
+  function hydrateNow(bot: string) {
     if (!options.archive) return;
     const data = options.archive.load(bot);
     if(loaded.has(bot)) {
@@ -66,28 +68,39 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     }
     if (cached.length > data.main.length) throw new Error("Canonical OptChat history is incomplete");
     const cachedNodes = db.prepare("SELECT start,count,text FROM optchat_nodes WHERE bot_id=?").all(bot) as (Part & { text: string })[];
+    const stored = new Map(cachedNodes.map(row => [label(row), row.text]));
     if (!data.tree.size) for (const line of cachedNodes) options.archive.appendTree(bot,{ l: Math.log2(line.count), i: line.start/line.count, text: line.text, size: bytes(line.text) });
     for (const line of data.tree.values()) {
-      const start = line.i*2**line.l, count = 2**line.l, old = node(bot,{start,count});
+      const start = line.i*2**line.l, count = 2**line.l, old = stored.get(label({start,count}));
       if (old !== undefined && old !== line.text) throw new Error("SQLite cache disagrees with canonical OptChat tree");
       if (old === undefined) db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,count,line.text);
     }
     // The view is reconstructed by the reference append+fit fold, never read
     // from a possibly stale persisted view snapshot.
-    saveParts(bot,[]);
-    for (let i=0;i<data.main.length;i++) { const view=parts(bot); view.push({start:i,count:1}); saveParts(bot,view); fit(bot,i+1); }
+    // Fold in memory and save once (spec §5.2: 2,300 messages in ~20 ms).
+    // Numeric keys: the fold looks nodes up millions of times on a long history.
+    const texts=new Map<number,Map<number,string>>();
+    for (const row of db.prepare("SELECT start,count,text FROM optchat_nodes WHERE bot_id=?").all(bot) as (Part&{text:string})[]) { let level=texts.get(row.count); if(!level)texts.set(row.count,level=new Map()); level.set(row.start,row.text); }
+    const view:Part[]=[];
+    const lookup=(part:Part)=>texts.get(part.count)?.get(part.start);let used=0;
+    for (let i=0;i<data.main.length;i++) { const leaf={start:i,count:1}; view.push(leaf); used=fold(view,i+1,lookup,used+partBytes(leaf,lookup)); }
+    saveParts(bot,view);
     loaded.add(bot);
   }
   function fit(bot: string, total = count(bot)) {
     const view = parts(bot);
-    const size = (p: Part) => bytes(node(bot, p) ?? "(not summarized yet: zoom it)");
-    let used = view.reduce((sum, p) => sum + size(p), 0);
+    fold(view, total, part => node(bot, part));
+    saveParts(bot, view);
+  }
+  // Merge the most due built pair until the view fits its budget; never split.
+  function fold(view: Part[], total: number, text: (part: Part) => string | undefined, used = view.reduce((sum, p) => sum + partBytes(p, text), 0)) {
+    const size = (p: Part) => partBytes(p, text);
     while (used > budget) {
       let best = -1, due = -1;
       for (let i = 0; i + 1 < view.length; i++) {
         const a = view[i], b = view[i + 1];
         if (a.count !== b.count || a.start % (a.count * 2) !== 0 || b.start !== a.start + a.count) continue;
-        if (node(bot, { start: a.start, count: a.count * 2 }) === undefined) continue;
+        if (text({ start: a.start, count: a.count * 2 }) === undefined) continue;
         const weight = (total - a.start) / (a.count * 4);
         if (weight > due) { best = i; due = weight; }
       }
@@ -96,8 +109,9 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       used += size(parent) - size(a) - size(b);
       view.splice(best, 2, parent);
     }
-    saveParts(bot, view);
+    return used;
   }
+  function partBytes(part: Part, text: (part: Part) => string | undefined) { return bytes(text(part) ?? "(not summarized yet: zoom it)"); }
   const temporaryInbox=new Map<string,Map<string,Receipt>>();
   function receipts(bot:string){if(options.archive)return options.archive.receipts(bot);let values=temporaryInbox.get(bot);if(!values)temporaryInbox.set(bot,values=new Map());return values;}
   function receive(bot:string,threadId:string,id:string,parentId:string,text:string){const value={id,parentId,threadId,text,date:new Date(now()).toISOString()};if(options.archive)return options.archive.receive(bot,value);const old=receipts(bot).get(id);if(old){if(old.text!==text||old.threadId!==threadId)throw new Error("Conflicting duplicate queued input");return old;}receipts(bot).set(id,value);return value;}
