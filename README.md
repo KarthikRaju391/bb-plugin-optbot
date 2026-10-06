@@ -54,20 +54,22 @@ No original plugin installation or live bot records are changed by building it.
 
 ### Run without an API key
 
-Choose an installed provider in BB's native conversation composer. OptBot wraps
-that selection as `bb/<provider>/<model>` and runs a fresh hidden BB worker for
-each master turn. The visible conversation remains on the `optbot` orchestration
-provider so selecting another execution provider does not bypass memory.
-Existing `bb/codex` conversations now delegate to BB's installed Codex provider.
-OptBot publishes empty `models` and `selectedOnlyModels`: BB exposes the latter
-in **More models**, so neither list may mirror native choices. Creation supplies
-the exact wrapped model identity without relying on a catalog. Existing threads
-can consequently show their raw stored model identifier without friendly model
-labels or model-specific reasoning controls. BB SDK 0.5.29 has no internal/hidden
-provider policy or per-composer provider filter, so the OptBot provider tab can
-still appear. Removing that tab while retaining orchestration needs a BB API
-change; choosing a native provider directly on an existing outer thread bypasses
-the OptChat bridge.
+Start a conversation from the OptBot sidebar and pick any installed BB provider
+and model. OptBot stores the choice as `bb/<provider>/<model>` and runs a fresh
+hidden BB worker on it for each turn, using that provider's own login.
+
+**Switching models.** Use the model picker in the conversation's composer. It
+lists every installed provider's models with the provider shown beside each one;
+large catalogs (such as Pi's OpenRouter and Bedrock routes) are under **More
+models**. A switch applies from the next turn and keeps the conversation's
+memory. Choosing another provider's *tab* in that picker is BB's handoff and
+starts an ordinary thread outside OptBot.
+
+**Why OptBot isn't in BB's new-thread picker.** OptBot declares
+`experimental_visibility: "installed"` and reports itself as not installed, so
+BB leaves it out of the global new-thread picker, other threads' handoff tabs and
+provider settings. OptBot conversations still run normally. This relies on an
+experimental BB field.
 
 ### Inspect bot memory
 
