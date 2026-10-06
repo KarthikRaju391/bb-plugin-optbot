@@ -29,8 +29,10 @@ Then choose **OptBot** in **Settings → Sidebar**.
 
 ### Set up the summarizer
 
-Summaries are written by Codex, through an existing Codex login on one of your BB
-machines. No API key is needed.
+Summaries are written through an existing Codex or Claude Code login on one of
+your BB machines. No API key is needed. If summaries keep failing (for example a
+usage limit), a waiting turn ends after a minute with the summarizer's error
+instead of hanging; your message stays in the history.
 
 ```sh
 bb plugin config optbot set compactorHost <machine-id>        # a machine signed in to Codex
@@ -38,8 +40,8 @@ bb plugin config optbot set compactorModel bb/codex/gpt-6-luna # a small model i
 bb optbot model check                                          # runs one test summary
 ```
 
-`compactorModel` accepts `bb/codex` (Codex's default model) or
-`bb/codex/<model>`. An API summarizer is also supported: set `compactorModel` to
+`compactorModel` accepts `bb/codex[/<model>]` or `bb/claude-code[/<model>]`
+(for example `bb/claude-code/claude-haiku-4-5-20251001`). An API summarizer is also supported: set `compactorModel` to
 an `openai/<model>` or `anthropic/<model>` ID and `compactorApiKey` (stored as a
 secret).
 
@@ -107,7 +109,7 @@ context. Back up the data folder; the log is the bot's memory.
 
 - BB 0.44 or newer, Plugin SDK 0.5.29 or newer, and at least one installed BB
   agent provider for conversations.
-- A Codex login on one BB machine for the summarizer (or an API key).
+- A Codex or Claude Code login on one BB machine for the summarizer (or an API key).
 - Turns always run with **Full access** on the chosen provider; Plan mode is not
   available in OptBot conversations.
 - Prompt caching is handled by each provider; OptBot cannot set the spec's cache

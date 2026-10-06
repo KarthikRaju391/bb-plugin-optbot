@@ -58,8 +58,9 @@ export async function runOptChatTurn(args: {
     for (;;) {
       check();
       if(args.background) {
-        const state=await call({action:"settled",lease}) as {settled:boolean};
+        const state=await call({action:"settled",lease}) as {settled:boolean;blocked?:string};
         if(state.settled) return;
+        if(state.blocked) throw new Error(`Memory summaries keep failing, so this turn cannot start: ${state.blocked}. Your message is kept in the history. Fix the summarizer (OptBot settings: Compactor model / machine), then send again.`);
         await pause(100,options.signal); continue;
       }
       const task = await call({ action: "work", lease }) as Compression | null;
