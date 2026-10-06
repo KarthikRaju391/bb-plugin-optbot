@@ -29,8 +29,9 @@ No original plugin installation or live bot records are changed by building it.
   The shortest actual candidate is retained even after five overshoots. Failed
   jobs are reported once and retried after ten seconds; no fake summary is used.
 - Each master turn reads only a settled view, then starts a fresh provider
-  conversation with constant MASTER/VIEW_DOC/instruction headers, that view, and
-  the complete current input. The tool loop and mid-turn messages continue inside
+  conversation with the spec's MASTER and VIEW_DOC (VIEW_DOC names `optbot_memory`
+  for BB workers), the user's instructions, that view, and the complete current
+  input. The tool loop and mid-turn messages continue inside
   that call; signed/encrypted reasoning is preserved for provider caching but
   excluded from the conversation log. Completed thoughts can stream to the UI.
 - BB models execute in fresh **hidden BB worker threads**, using the selected
@@ -83,22 +84,18 @@ truncation notice; the JSONL pages retain the full stored text.
 The existing **State** tab edits optional pinned context; it is not this history
 or the automatic summary tree. Neither tab is added to bot creation.
 
-Set **Compactor BB machine ID** to an enrolled machine with the chosen provider.
-The default `compactorModel` is `bb/codex`; any `bb/<provider>/<model>` selection
-uses the same native worker service. Authentication stays with BB. The configured
-machine must remain online for large-message compaction. Example operator setup:
-
-**Safety gate:** automatic native background compaction is paused by default.
-BB's public worker API cannot disable every provider-native tool. Processing
-untrusted historical text with those tools is therefore not a text-only boundary.
-The operator may explicitly enable `allowNativeSummaryTools` after accepting that
-risk, or choose a text-only API summarizer. Without either, long-message
-compaction remains pending and can block the next settled memory view. The
-benign, operator-requested readiness check still works without this opt-in.
+Set **Compactor BB machine ID** to an enrolled machine with a Codex login. The
+compactor is a tool-less text call through that login (no API key): COMPACT is
+the system prompt, there are no tools or environments, effort is medium, and the
+`<chat>` context comes first so it caches. `compactorModel` accepts `bb/codex` or
+`bb/codex/<model>`; prefer a small model such as `bb/codex/gpt-6-luna`. Execution
+still runs on hidden BB worker threads; only summarization bypasses them, because
+BB worker threads are full agents and cannot be made tool-free. The configured
+machine must remain online for compaction. Example operator setup:
 
 ```sh
 bb plugin config optbot set compactorHost <machine-id>
-bb plugin config optbot set compactorModel bb/codex
+bb plugin config optbot set compactorModel bb/codex/gpt-6-luna
 bb plugin reload optbot
 bb optbot model check
 ```
@@ -111,9 +108,9 @@ messages and native tool receipts enter canonical history; reasoning does not.
 Workers are hidden and archived on completion/cancellation. They consume BB
 concurrency slots, so the host needs capacity beyond the visible conversation.
 
-`bb optbot model check` executes a small readiness summary through an actual
-hidden BB worker and returns the model, machine ID, and generated text. It does
-not write bot history. It consumes a provider call and archives its worker.
+`bb optbot model check` runs a small readiness summary through the compactor
+machine's Codex login and returns the model, machine ID, and generated text. It
+does not write bot history. It consumes one provider call.
 
 For explicitly selected API models only, the execution host needs
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. The API compactor instead uses the secret
