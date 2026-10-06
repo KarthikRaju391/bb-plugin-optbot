@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { BbPluginApi, PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import type { z } from "zod";
@@ -273,7 +274,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.created", async ({ thread }) => { await routeNewThread(thread, true); });
 
-  registerBotsCli(bb, store, resolveOwner, memoryCommands(store,optchat,resolveOwner), optchat.checkModel);
+  registerBotsCli(bb, store, resolveOwner, memoryCommands(store,optchat,resolveOwner,join(dirname(bb.storage.database().name),"exports")), optchat.checkModel);
   registerBotMentions(bb, store);
 
   bb.rpc.register(rpcContract, {

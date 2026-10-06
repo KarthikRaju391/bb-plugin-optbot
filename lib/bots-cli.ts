@@ -84,7 +84,7 @@ export function registerBotsCli(bb: BbPluginApi, store: BotStore, resolveOwner: 
     commands: [
       { name: "list", summary: "List bot IDs, activity, visibility, and owned/joined project names without private state", usage: "bb optbot list [--json] [--limit 1-100] [--offset N]" },
       { name: "message", summary: "Message a bot's main conversation, or reply to one of its conversations; queues while busy", usage: "bb optbot message <bot-id-or-exact-name> <message> [--thread <conversation-id>] [--json]" },
-      ...(memory?[{name:"memory",usage:"bb optbot memory <view|browse|backup|import> <bot-id> [JSON]",summary:"Inspect, back up, or import private OptChat history"}]:[]),
+      ...(memory?[{name:"memory",usage:"bb optbot memory <view|browse|backup|import> <bot-id> [JSON|@file]",summary:"Inspect, back up (to a file), or import private OptChat history"}]:[]),
       ...(checkModel?[{name:"model",usage:"bb optbot model check",summary:"Verify the configured BB host can summarize with its native login (no history writes or helper threads)"}]:[]),
     ],
     async run(argv, ctx) {

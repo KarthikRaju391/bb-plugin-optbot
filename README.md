@@ -139,12 +139,14 @@ conflicting entries or incomplete imported subtrees fail before writes. For larg
 imports, send sequential bounded chunks rather than exceeding shell argument
 limits. A backup JSON object can be supplied to the same import command.
 
-- `bb optbot memory import <bot-id> '<JSON-array-or-backup>'`
+- `bb optbot memory import <bot-id> '<JSON-array-or-backup>'`, or `@/absolute/path/backup.json` for a backup file
+  (a JSON argument is limited to about 128 KB).
 - `bb optbot memory view <bot-id>` — bounded current view; no model call.
-- `bb optbot memory browse <bot-id> > memory.html` — private, escaped HTML with
+- `bb optbot memory browse <bot-id>` — writes a private, escaped HTML page (path printed) with
   the current view, full ROOT messages, all stored levels, ranges, dates and sizes.
-- `bb optbot memory backup <bot-id> > memory.json` — canonical transcript/tree
-  export. Keep exports private and outside Git; also back up the plugin database
+- `bb optbot memory backup <bot-id>` — writes the canonical transcript/tree JSON to OptBot's
+  `exports/<bot-id>/` data folder and prints its path (BB caps CLI output at 1 MB); restore it with
+  `memory import <bot-id> @<path>`. Keep exports private and outside Git; also back up the plugin database
   for sidebar identities, bindings, leases and answer checkpoints.
 
 Contextual agents can read only their own bot and cannot import history. The
