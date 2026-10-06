@@ -87,11 +87,11 @@ it("states current ownership/membership accurately without modifying membership"
   host.store.changeProjectRole(a.id,"project","release");
   expect(botProjectContext(b,project(),host.store).ownerBotId).toBeNull();
 });
-it("keeps complete compliant memory inside BB instruction budget with relationship",async () => {
+it("keeps identity inside BB instruction budget with relationship and never injects legacy MEMORY.md",async () => {
   const {a}=await setup();
   const memory="m".repeat(3000);
   const result=botInstructions({...a,name:"n".repeat(120),role:"r".repeat(80),id:"i".repeat(128),soul:"s".repeat(4000),memory},{id:'"'.repeat(80),name:'"'.repeat(100),role:"unjoined",ownerBotId:'"'.repeat(80),ownerName:'"'.repeat(120)});
-  expect(result.length).toBeLessThanOrEqual(4096); expect(result).toContain(memory);
+  expect(result.length).toBeLessThanOrEqual(4096); expect(result).not.toContain("mmmm"); expect(result).not.toContain("Pinned context");
   expect(BOT_GUIDANCE.length).toBeLessThanOrEqual(4096);
 });
 

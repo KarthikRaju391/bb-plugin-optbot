@@ -73,7 +73,7 @@ it("keeps the editor compact with one panel, retained drafts, and an outside-pan
   fireEvent.contextMenu(slot.getByText("Bot one"));
   fireEvent.click(await slot.findByRole("menuitem", { name: "Edit bot…" }));
   const dialog = await slot.findByRole("dialog", { name: "Edit bot" });
-  expect(within(dialog).getAllByRole("tab")).toHaveLength(6);
+  expect(within(dialog).getAllByRole("tab")).toHaveLength(5);
   expect(within(dialog).getAllByRole("tabpanel")).toHaveLength(1);
   expect(dialog.querySelector("textarea")).toBeNull();
   expect(within(dialog).getByRole("img", { name: "Bot preview" }).getAttribute("width")).toBe("48");

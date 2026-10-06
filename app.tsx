@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { MemoryInspector } from "./components/memory-inspector";
+import { ConversationModelPicker } from "./components/conversation-model-picker";
 import type { DragEvent, PointerEvent as ReactPointerEvent, ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
@@ -62,7 +63,7 @@ type HostOption = { id: string; name: string; connected: boolean };
 type ProjectOption = { id: string; name: string };
 type BotEditFields = Pick<BotMetadata, "hostId" | "name" | "role" | "avatar" | "sectionId" | "linkedProjectIds" | "soul" | "settings"> & { ownedProjectIds: string[]; memory?: string };
 type ProjectRole = "none" | "member" | "owner";
-type EditorTab = "setup" | "instructions" | "state" | "memory" | "projects" | "appearance";
+type EditorTab = "setup" | "instructions" | "memory" | "projects" | "appearance";
 type EditorTarget =
   | { kind: "create" }
   | { kind: "edit"; metadata: BotMetadata; projectOwners: ProjectOwner[]; tab?: EditorTab };
@@ -164,7 +165,6 @@ function BotEditor({ target, hosts, sections, projects, bots, projectOwners, onC
   const [hostId, setHostId] = useState(editing ? target.metadata.hostId : hosts.find((host) => host.connected)?.id ?? hosts[0]?.id ?? "");
   const [memory, setMemory] = useState(editing ? target.metadata.memory : "");
   const [settingsText, setSettingsText] = useState(() => `${JSON.stringify(editing ? target.metadata.settings : {}, null, 2)}\n`);
-  const [stateFile, setStateFile] = useState<"MEMORY.md" | "settings.json">("MEMORY.md");
   const initialOwners = editing ? target.projectOwners : projectOwners;
   const [owners] = useState(initialOwners);
   const [botNames] = useState(() => new Map(bots.map((bot) => [bot.id, bot.name])));
@@ -186,7 +186,7 @@ function BotEditor({ target, hosts, sections, projects, bots, projectOwners, onC
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<EditorTab>(editing ? target.tab ?? "setup" : "setup");
   const tabsId = useId();
-  const tabs = ([{ id: "setup", label: "Setup" }, { id: "instructions", label: "Instructions" }, { id: "state", label: "State" }, { id: "memory", label: "Memory" }, { id: "projects", label: `Projects${linkedProjectIds.length ? ` · ${linkedProjectIds.length}` : ""}` }, { id: "appearance", label: "Appearance" }] as const).filter((entry) => editing || (entry.id !== "state" && entry.id !== "memory"));
+  const tabs = ([{ id: "setup", label: "Setup" }, { id: "instructions", label: "Instructions" }, { id: "memory", label: "Memory" }, { id: "projects", label: `Projects${linkedProjectIds.length ? ` · ${linkedProjectIds.length}` : ""}` }, { id: "appearance", label: "Appearance" }] as const).filter((entry) => editing || entry.id !== "memory");
   function setProjectRole(projectId: string, next: ProjectRole) {
     const otherOwner = owners.find((owner) => owner.projectId === projectId && owner.botId !== botId);
     if (next === "owner" && otherOwner) return;
@@ -214,11 +214,11 @@ function BotEditor({ target, hosts, sections, projects, bots, projectOwners, onC
     try {
       let parsed: unknown;
       try { parsed = JSON.parse(settingsText, (_key, value: unknown) => { if (typeof value === "number" && !Number.isFinite(value)) throw new Error("Settings numbers must be finite"); return value; }); }
-      catch { setTab("state"); setStateFile("settings.json"); throw new Error("settings.json must contain valid JSON. Your draft is kept."); }
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") { setTab("state"); setStateFile("settings.json"); throw new Error("settings.json must contain a JSON object. Your draft is kept."); }
-      if (`${JSON.stringify(parsed, null, 2)}\n`.length > 16384) { setTab("state"); setStateFile("settings.json"); throw new Error("settings.json is too large (maximum 16384 characters). Your draft is kept."); }
+      catch { throw new Error("settings.json must contain valid JSON. Your draft is kept."); }
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") { throw new Error("settings.json must contain a JSON object. Your draft is kept."); }
+      if (`${JSON.stringify(parsed, null, 2)}\n`.length > 16384) { throw new Error("settings.json is too large (maximum 16384 characters). Your draft is kept."); }
       const memoryChanged = !editing || memory !== target.metadata.memory;
-      if (memoryChanged && memory.length > MEMORY_MAX_CHARS) { setTab("state"); setStateFile("MEMORY.md"); throw new Error("MEMORY.md must be at most 3000 characters. Shorten your draft before saving; it has been kept."); }
+      if (memoryChanged && memory.length > MEMORY_MAX_CHARS) { throw new Error("MEMORY.md must be at most 3000 characters. Shorten your draft before saving; it has been kept."); }
       const fields = { hostId, name: name.trim(), role: role.trim(), avatar, sectionId, soul, ...(memoryChanged ? { memory } : {}), settings: parsed as BotMetadata["settings"], linkedProjectIds, ownedProjectIds };
       if (target.kind === "edit") await onUpdate(fields);
       else await onCreate({ ...fields, hostId });
@@ -276,12 +276,6 @@ function BotEditor({ target, hosts, sections, projects, bots, projectOwners, onC
             <textarea aria-label="SOUL.md" className="min-h-24 w-full flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground" value={soul} maxLength={4096} disabled={pending} onChange={(event) => setSoul(event.target.value)} onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} placeholder="Personality, perspective, and communication style." />
           </div> : null}
           {editing && tab === "memory" && botId ? <MemoryInspector botId={botId} /> : null}
-          {editing && tab === "state" ? <div className="flex h-full min-h-0 flex-col gap-2">
-            <div className="flex shrink-0 items-center justify-between gap-2"><div role="group" aria-label="State file" className="flex gap-1">{(["MEMORY.md", "settings.json"] as const).map((file) => <Button key={file} type="button" variant="ghost" size="sm" className="h-7 px-2" aria-pressed={stateFile === file} onClick={() => setStateFile(file)}>{file}</Button>)}</div><span className="text-[10px] text-muted-foreground">{(stateFile === "MEMORY.md" ? memory : settingsText).length}/{stateFile === "MEMORY.md" ? MEMORY_MAX_CHARS : 16384}</span></div>
-            <textarea aria-label={stateFile} className="min-h-24 w-full flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground" value={stateFile === "MEMORY.md" ? memory : settingsText} maxLength={stateFile === "MEMORY.md" ? undefined : 16384} disabled={pending} spellCheck={false} onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onChange={(event) => stateFile === "MEMORY.md" ? setMemory(event.target.value) : setSettingsText(event.target.value)} />
-            {stateFile === "MEMORY.md" && memory.length > MEMORY_MAX_CHARS ? <p role="status" className="text-xs text-destructive">Memory exceeds 3000 characters. Shorten it before saving a memory change. Existing text is kept.</p> : null}
-            <p className="shrink-0 text-[10px] text-muted-foreground">Private to this bot. Saved together with the bot; don’t store credentials here.</p>
-          </div> : null}
           <div hidden={tab !== "projects"}><BotProjectsPanel projects={projects} owners={owners} botNames={botNames} botId={botId} botName={name} hostId={hostId} hosts={hosts} linkedProjectIds={linkedProjectIds} ownedProjectIds={ownedProjectIds} onRoleChange={setProjectRole} onBusyChange={setProjectPending} onDraftChange={setProjectDraft} onCreateProject={onCreateProject} onBrowseProjects={onBrowseProjects} /></div>
           {tab === "appearance" ? <AvatarAppearance avatar={avatar} onChange={setAvatar} /> : null}
         </div>
@@ -839,4 +833,5 @@ export default definePluginApp((app) => {
     description: "Independent bots with their conversation trees and unassigned chats.",
     component: BotsSidebar,
   });
+  app.slots.experimental_threadHeaderAction({ id: "conversation-model", title: "OptBot model", component: ConversationModelPicker });
 });

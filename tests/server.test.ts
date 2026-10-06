@@ -279,13 +279,13 @@ describe("v2 state import", () => {
   });
 });
 
-it("injects fixed guidance, SOUL and all compliant memory, without archived bot AGENTS", async () => {
+it("injects fixed guidance and SOUL, without legacy MEMORY.md or archived bot AGENTS", async () => {
   const host = await setup(); const bot = await host.create();
   host.store.save({ ...bot, name: "N".repeat(120), role: "R".repeat(80), soul: "Unique soul " + "s".repeat(4084), agents: "Archived instructions must not run", memory: "m".repeat(3000) });
   host.store.bind("configured", bot.id);
   const configuration = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: "configured" } }));
   expect(configuration.instructions).toContain("Unique soul");
-  expect(configuration.instructions).toContain("m".repeat(3000));
+  expect(configuration.instructions).not.toContain("mmmm");
   expect(configuration.instructions!.length).toBeLessThanOrEqual(4096);
   expect(configuration.instructions).toContain("[Truncated: use optbot_read_state for complete state.]");
   const guidance = host.harness.inspection.registrations.agentTools.find(tool => tool.name === "optbot_read_state")!.instructions!;

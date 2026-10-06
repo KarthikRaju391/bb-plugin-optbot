@@ -36,19 +36,22 @@ async function mount({ update, prepareFailures = 0, expectFailure = false }: { u
   const dialog = expectFailure ? null : await slot.findByRole("dialog", { name: "Edit bot" });
   return { slot, dialog: dialog!, onNavigate, open, getCurrent: () => current, changeCurrent: (patch: Partial<BotMetadata>) => { current = { ...current, ...patch }; } };
 }
-function file(dialog: HTMLElement, name: "SOUL.md" | "MEMORY.md" | "settings.json") {
-  fireEvent.click(within(dialog).getByRole("tab", { name: name === "SOUL.md" ? "Instructions" : "State" }));
-  if (name !== "SOUL.md") fireEvent.click(within(dialog).getByRole("button", { name }));
-  return within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name });
+function soulBox(dialog: HTMLElement) {
+  fireEvent.click(within(dialog).getByRole("tab", { name: "Instructions" }));
+  return within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "SOUL.md" });
 }
 
-it("puts the three active logical files in Edit bot with one Save and no separate state action", async () => {
+it("edits identity in one Save with no MEMORY.md, settings.json or AGENTS controls", async () => {
   const { slot, dialog, onNavigate } = await mount();
-  expect(within(dialog).getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Setup", "Instructions", "State", "Memory", "Projects · 1", "Appearance"]);
-  expect(file(dialog, "SOUL.md").value).toBe("Fresh private identity");
-  expect(file(dialog, "MEMORY.md").value).toBe("- A private fact.\n");
-  expect(JSON.parse(file(dialog, "settings.json").value)).toEqual({ style: "concise" });
-  expect(dialog.querySelectorAll("textarea")).toHaveLength(1);
+  expect(within(dialog).getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Setup", "Instructions", "Memory", "Projects · 1", "Appearance"]);
+  expect(soulBox(dialog).value).toBe("Fresh private identity");
+  for (const tab of within(dialog).getAllByRole("tab")) {
+    if (tab.textContent === "Memory") continue;
+    fireEvent.click(tab);
+    expect(within(dialog).queryByRole("textbox", { name: "MEMORY.md" })).toBeNull();
+    expect(within(dialog).queryByRole("textbox", { name: "settings.json" })).toBeNull();
+    expect(within(dialog).queryByText(/MEMORY\.md|settings\.json|AGENTS\.md/)).toBeNull();
+  }
   expect(within(dialog).queryByRole("button", { name: "Save file" })).toBeNull();
   expect(within(dialog).getByRole("button", { name: "Save bot" }).closest('[role="tabpanel"]')).toBeNull();
   expect(slot.inspection.rpcCalls.every(call => ["bots_list", "bot_prepare"].includes(call.method))).toBe(true);
@@ -56,105 +59,54 @@ it("puts the three active logical files in Edit bot with one Save and no separat
   expect(dialog.textContent).not.toMatch(/\/home\/|Home folder|Unrelated checkout/);
 });
 
-it("retains every draft across tabs and atomically submits all files with original hashes", async () => {
+it("submits identity with original hashes and leaves stored memory and settings untouched", async () => {
   const { slot, dialog } = await mount();
-  fireEvent.change(file(dialog, "SOUL.md"), { target: { value: "New soul\nSecond line" } });
-  const memory = file(dialog, "MEMORY.md"); expect(fireEvent.keyDown(memory, { key: "Enter" })).toBe(true);
-  fireEvent.change(memory, { target: { value: "- New memory.\n" } });
-  fireEvent.change(file(dialog, "settings.json"), { target: { value: '{"style":"detailed","nested":{"enabled":true}}' } });
+  fireEvent.change(soulBox(dialog), { target: { value: "New soul\nSecond line" } });
   fireEvent.click(within(dialog).getByRole("tab", { name: "Appearance" }));
-  expect(file(dialog, "MEMORY.md").value).toBe("- New memory.\n");
-  expect(file(dialog, "SOUL.md").value).toBe("New soul\nSecond line");
+  expect(soulBox(dialog).value).toBe("New soul\nSecond line");
   expect(slot.inspection.rpcCalls.some(call => call.method === "bot_update")).toBe(false);
   fireEvent.click(within(dialog).getByRole("button", { name: "Save bot" }));
   await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
-  expect(slot.inspection.rpcCalls.filter(call => call.method === "bot_update")).toEqual([{ method: "bot_update", input: expect.objectContaining({ botId: "remote-bot", soul: "New soul\nSecond line", memory: "- New memory.\n", settings: { style: "detailed", nested: { enabled: true } }, expectedUpdatedAt: 10, expectedStateHashes: hashes }) }]);
+  const updates = slot.inspection.rpcCalls.filter(call => call.method === "bot_update");
+  expect(updates).toEqual([{ method: "bot_update", input: expect.objectContaining({ botId: "remote-bot", soul: "New soul\nSecond line", settings: { style: "concise" }, expectedUpdatedAt: 10, expectedStateHashes: hashes }) }]);
+  expect(updates[0]!.input).not.toHaveProperty("memory");
   expect(slot.inspection.rpcCalls.some(call => call.method === "state_update")).toBe(false);
 });
 
-it("keeps state drafts and their original revisions on conflicts and realtime refresh", async () => {
-  const { slot, dialog, changeCurrent } = await mount({ update: () => { throw new Error("MEMORY.md changed while editing"); } });
-  fireEvent.change(file(dialog, "MEMORY.md"), { target: { value: "Keep my memory draft" } });
-  fireEvent.change(file(dialog, "settings.json"), { target: { value: '{"keep":"settings draft"}' } });
+it("keeps the identity draft on conflicts and realtime refresh", async () => {
+  const { slot, dialog, changeCurrent } = await mount({ update: () => { throw new Error("SOUL.md changed while editing"); } });
+  fireEvent.change(soulBox(dialog), { target: { value: "Keep my identity draft" } });
   fireEvent.click(within(dialog).getByRole("button", { name: "Save bot" }));
-  expect((await within(dialog).findByRole("alert")).textContent).toContain("MEMORY.md changed");
-  changeCurrent({ memory: "Changed elsewhere", updatedAt: 20 }); await slot.behavior.emitRealtime("project-bots-changed", {});
-  expect(file(dialog, "MEMORY.md").value).toBe("Keep my memory draft");
-  expect(file(dialog, "settings.json").value).toBe('{"keep":"settings draft"}');
+  expect((await within(dialog).findByRole("alert")).textContent).toContain("SOUL.md changed");
+  changeCurrent({ soul: "Changed elsewhere", updatedAt: 20 }); await slot.behavior.emitRealtime("project-bots-changed", {});
+  expect(soulBox(dialog).value).toBe("Keep my identity draft");
   expect(slot.inspection.rpcCalls.filter(call => call.method === "bot_update")).toHaveLength(1);
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false); fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-  expect(confirm).toHaveBeenCalledWith("Discard unsaved bot state changes?"); expect(slot.getByRole("dialog")).toBe(dialog);
-});
-
-it.each(["{", "[]", "null", "4", '{"limit":1e400}'])("retains invalid settings %s without partially saving other fields", async (invalid) => {
-  const { slot, dialog } = await mount();
-  fireEvent.change(file(dialog, "MEMORY.md"), { target: { value: "Unsaved memory" } });
-  fireEvent.change(file(dialog, "settings.json"), { target: { value: invalid } });
-  fireEvent.click(within(dialog).getByRole("tab", { name: "Setup" }));
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save bot" }));
-  await within(dialog).findByRole("alert");
-  expect(within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "settings.json" }).value).toBe(invalid);
-  expect(slot.inspection.rpcCalls.some(call => call.method === "bot_update")).toBe(false);
-  fireEvent.change(file(dialog, "settings.json"), { target: { value: '{"fixed":true}' } });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save bot" }));
-  await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
-  expect(slot.inspection.rpcCalls).toContainEqual({ method: "bot_update", input: expect.objectContaining({ memory: "Unsaved memory", settings: { fixed: true } }) });
-});
-
-it("rejects oversized canonical settings before any mutation", async () => {
-  const { slot, dialog } = await mount(); const value = Object.fromEntries(Array.from({ length: 1500 }, (_, index) => [`k${index}`, 0]));
-  expect(JSON.stringify(value).length).toBeLessThan(16384); expect(JSON.stringify(value, null, 2).length).toBeGreaterThan(16384);
-  fireEvent.change(file(dialog, "settings.json"), { target: { value: JSON.stringify(value) } });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save bot" }));
-  expect((await within(dialog).findByRole("alert")).textContent).toContain("too large");
-  expect(slot.inspection.rpcCalls.some(call => call.method === "bot_update")).toBe(false);
 });
 
 it("does not expose stale cached state when preparation fails and allows reopening", async () => {
   const { slot, open } = await mount({ prepareFailures: 1, expectFailure: true });
   expect((await slot.findByRole("alert")).textContent).toContain("Private state unavailable"); expect(slot.queryByRole("dialog")).toBeNull();
   await open(); const dialog = await slot.findByRole("dialog", { name: "Edit bot" });
-  expect(file(dialog, "SOUL.md").value).toBe("Fresh private identity");
+  expect(soulBox(dialog).value).toBe("Fresh private identity");
 });
 
 it("blocks duplicate writes and closing while a unified save is pending", async () => {
   let resolve!: (value: BotMetadata) => void; const response = new Promise<BotMetadata>(done => { resolve = done; });
   const { slot, dialog, getCurrent } = await mount({ update: () => response });
-  fireEvent.change(file(dialog, "MEMORY.md"), { target: { value: "Save once" } });
+  fireEvent.change(soulBox(dialog), { target: { value: "Save once" } });
   const save = within(dialog).getByRole("button", { name: "Save bot" }); fireEvent.click(save); fireEvent.click(save);
   expect(slot.inspection.rpcCalls.filter(call => call.method === "bot_update")).toHaveLength(1);
   fireEvent.keyDown(dialog, { key: "Escape" }); expect(slot.getByRole("dialog")).toBe(dialog);
-  expect(file(dialog, "settings.json").disabled).toBe(true);
-  await act(async () => { resolve({ ...getCurrent(), memory: "Save once" }); });
+  await act(async () => { resolve({ ...getCurrent(), soul: "Save once" }); });
   await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
 });
 
-it("removes bot AGENTS controls and retains an oversized memory draft without partial submission", async () => {
-  const { slot, dialog } = await mount();
-  file(dialog, "SOUL.md");
-  expect(within(dialog).queryByText("AGENTS.md")).toBeNull();
-  const memory = file(dialog, "MEMORY.md");
-  fireEvent.change(memory, { target: { value: "x".repeat(3001) } });
-  expect(memory.value).toHaveLength(3001);
-  expect(within(dialog).getByText("3001/3000")).toBeTruthy();
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save bot" }));
-  expect((await within(dialog).findByRole("alert")).textContent).toContain("3000 characters");
-  expect(slot.inspection.rpcCalls.some(call => call.method === "bot_update")).toBe(false);
-  expect(file(dialog, "MEMORY.md").value).toHaveLength(3001);
-  fireEvent.change(file(dialog, "MEMORY.md"), { target: { value: "x".repeat(3000) } });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save bot" }));
-  await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
-  expect(slot.inspection.rpcCalls.find(call => call.method === "bot_update")?.input).toMatchObject({ memory: "x".repeat(3000) });
-  expect(slot.inspection.rpcCalls.find(call => call.method === "bot_update")?.input).not.toHaveProperty("agents");
-});
-
-it("reads legacy oversized memory and saves unrelated edits without rewriting it", async () => {
+it("saves unrelated edits without rewriting legacy oversized memory", async () => {
   const { slot, dialog, open, changeCurrent } = await mount();
   fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
   changeCurrent({ memory: "L".repeat(8000) });
   await open();
   const reopened = await slot.findByRole("dialog", { name: "Edit bot" });
-  expect(file(reopened, "MEMORY.md").value).toHaveLength(8000);
   fireEvent.change(within(reopened).getByRole("textbox", { name: "Bot name" }), { target: { value: "Renamed safely" } });
   fireEvent.click(within(reopened).getByRole("button", { name: "Save bot" }));
   await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());

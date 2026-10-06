@@ -3,6 +3,7 @@ import {z} from "zod";
 import type {BbPluginApi,PluginAgentConfigurationContext} from "@get-bb/plugin-sdk";
 import {bbModelRef,type WorkerPage} from "../runtime/bb";
 import type {ModelEvent} from "../runtime/turn";
+import type {ModelSelection} from "../contract";
 import {capResult} from "../runtime/cache";
 type NativeItem = Extract<Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>[number], {type:"item/completed"}>["data"]["item"];
 // SDK canonical items separate invocation fields from execution/result metadata.
@@ -40,6 +41,10 @@ export function createBbWorkers(bb:BbPluginApi) {
  db.exec("CREATE TABLE IF NOT EXISTS optbot_workers (key TEXT PRIMARY KEY,parent TEXT,bot TEXT,worker TEXT UNIQUE,fingerprint TEXT NOT NULL,instructions TEXT NOT NULL,role TEXT NOT NULL,status TEXT NOT NULL)");
  if(!(db.prepare("PRAGMA table_info(optbot_workers)").all() as {name:string}[]).some(column=>column.name==="pending_result"))db.exec("ALTER TABLE optbot_workers ADD COLUMN pending_result TEXT");
  db.exec("CREATE TABLE IF NOT EXISTS optbot_worker_cancellations (key TEXT PRIMARY KEY,parent TEXT,bot TEXT)");
+ // One model choice per conversation: "user" rows come from the header picker and win; "turn" rows record the last model used.
+ db.exec("CREATE TABLE IF NOT EXISTS optbot_conversation_models (thread_id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL)");
+ function selection(threadId:string){const row=db.prepare("SELECT value,source FROM optbot_conversation_models WHERE thread_id=?").get(threadId) as {value:string;source:"user"|"turn"}|undefined;return row?{value:JSON.parse(row.value) as ModelSelection,source:row.source}:null;}
+ function saveSelection(threadId:string,value:ModelSelection,source:"user"|"turn"){db.prepare("INSERT INTO optbot_conversation_models VALUES (?,?,?) ON CONFLICT(thread_id) DO UPDATE SET value=excluded.value,source=excluded.source").run(threadId,JSON.stringify(value),source);}
  const locks=new Map<string,Promise<unknown>>();
  let closed=false;
  async function locked<T>(key:string,operation:()=>Promise<T>):Promise<T> {
@@ -135,10 +140,15 @@ export function createBbWorkers(bb:BbPluginApi) {
  async function execute(raw:z.infer<typeof workerInput>,parent:string,bot:string) {
   if(raw.action==="start") {
    if(!raw.key||!raw.model||raw.prompt===undefined)throw new Error("Worker start requires key, model and prompt");
+   const chosen=selection(parent);
+   const picked=chosen?.source==="user"?chosen.value:undefined;
+   const model=picked?`bb/${picked.providerId}/${picked.model}`:raw.model;
+   const reasoningLevel=picked?picked.reasoningLevel:raw.reasoningLevel, serviceTier=picked?picked.serviceTier:raw.serviceTier;
+   if(!picked){const ref=bbModelRef(model);if(ref.model)saveSelection(parent,{providerId:ref.providerId,model:ref.model,reasoningLevel:reasoningLevel??"medium",...(serviceTier?{serviceTier}:{})},"turn");}
    const thread=await bb.sdk.threads.get({threadId:parent});
    if(!thread.environmentId)throw new Error("Parent conversation has no execution environment");
-   return start({key:raw.key,model:raw.model,prompt:raw.prompt,instructions:raw.instructions??"",// OptBot always runs workers with Full access, whatever the model (user decision).
-   permissionMode:raw.permissionMode==="plan"?"plan":"full",...(raw.reasoningLevel?{reasoningLevel:raw.reasoningLevel}:{}),...(raw.serviceTier?{serviceTier:raw.serviceTier}:{}),parent,bot,projectId:thread.projectId,environment:{type:"reuse",environmentId:thread.environmentId},role:"master"});
+   return start({key:raw.key,model,prompt:raw.prompt,instructions:raw.instructions??"",// OptBot always runs workers with Full access, whatever the model (user decision).
+   permissionMode:raw.permissionMode==="plan"?"plan":"full",...(reasoningLevel?{reasoningLevel}:{}),...(serviceTier?{serviceTier}:{}),parent,bot,projectId:thread.projectId,environment:{type:"reuse",environmentId:thread.environmentId},role:"master"});
   }
   if(raw.action==="stop"&&raw.key){await cancelKey(raw.key,parent,bot);return {};}
   const row=raw.workerId?find(raw.workerId):undefined;
@@ -173,5 +183,5 @@ export function createBbWorkers(bb:BbPluginApi) {
   } catch {bb.log.warn("OptBot worker recovery remains pending; inspect the hidden worker timeline.");}
  }));
  bb.onDispose(async()=>{closed=true;await recovery;await Promise.allSettled([...locks.values()]);const rows=db.prepare("SELECT worker FROM optbot_workers WHERE worker IS NOT NULL AND status!='stopped'").all() as {worker:string}[];await Promise.all(rows.map(row=>stop(row.worker)));});
- return {configuration,owner:(threadId:string)=>{const row=find(threadId);return row?.status==="stopped"?null:row?.bot??null;},execute,start,poll,stop,cancelKey,key:randomUUID};
+ return {selection,saveSelection,configuration,owner:(threadId:string)=>{const row=find(threadId);return row?.status==="stopped"?null:row?.bot??null;},execute,start,poll,stop,cancelKey,key:randomUUID};
 }

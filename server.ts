@@ -296,6 +296,17 @@ export default async function plugin(bb: BbPluginApi) {
       const parent=node?.text??null, children=optchat.zoomText(botId,start,count);
       return {start,count,parent:parent?.slice(0,65536)??null,children:children.slice(0,65536),parentTruncated:(parent?.length??0)>65536,childrenTruncated:children.length>65536};
     },
+    conversation_model_get: async ({ threadId }) => {
+      // Rendered in every thread header: anything that is not an OptBot conversation hides the picker.
+      if (!(await resolveOwner(threadId, false).catch(() => null))) return { owned: false, environmentId: null, value: null };
+      const thread = await bb.sdk.threads.get({ threadId });
+      return { owned: thread.providerId === "optbot", environmentId: thread.environmentId ?? null, value: workers.selection(threadId)?.value ?? null };
+    },
+    conversation_model_set: async ({ threadId, value }) => {
+      if (!(await resolveOwner(threadId, false))) throw new Error("This conversation is not assigned to an OptBot");
+      workers.saveSelection(threadId, value, "user");
+      return { ok: true as const };
+    },
     project_browse: ({ hostId, path }) => browseProjectDirectory(bb, { hostId, path }),
     project_create: (input) => serial("project-create", () => serial(`project-create:${input.requestId}`, () => createWorkProject(bb, store, input))),
     bots_list: async () => {

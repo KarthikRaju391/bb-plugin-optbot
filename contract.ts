@@ -83,6 +83,10 @@ export const stateMutationToolSchema = z.object({
 });
 export const stateMutationResultSchema = z.object({ botId: id, target: stateTargetSchema, changed: z.boolean(), revision: z.number(), state: z.json() }).strict();
 
+// The execution choice BB's own provider/model picker emits for an OptBot conversation.
+export const modelSelectionSchema = z.object({ providerId: z.string().regex(/^[a-z0-9-]+$/).refine(value => value !== "optbot", "Pick a native BB provider"), model: z.string().min(1).max(256), reasoningLevel: z.enum(["high", "low", "max", "medium", "none", "ultra", "ultracode", "xhigh"]), serviceTier: z.enum(["default", "fast"]).optional() }).strict();
+export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+
 export const rpcContract = defineRpcContract({
   memory_inspect: { input: z.object({ botId: id, stream: z.enum(["main", "tree", "view"]), offset: z.number().int().nonnegative().default(0), snapshotToken: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(), output: z.object({ jsonl: z.string().max(16384), offset: z.number(), total: z.number(), nextOffset: z.number().nullable(), messages: z.number(), summaries: z.number(), settled: z.boolean(), snapshotToken: z.string().regex(/^[a-f0-9]{64}$/), snapshotReset: z.boolean() }).strict() },
   memory_node: { input: z.object({ botId: id, start: z.number().int().nonnegative(), count: z.number().int().positive().refine(n => Number.isInteger(Math.log2(n)), "Count must be a power of two") }).strict(), output: z.object({ start: z.number(), count: z.number(), parent: z.string().max(65536).nullable(), children: z.string().max(65536), parentTruncated: z.boolean(), childrenTruncated: z.boolean() }).strict() },
@@ -99,6 +103,8 @@ export const rpcContract = defineRpcContract({
   visibility_set: { input: z.object({ botId: id, hiddenUntilActivity: z.boolean() }).strict(), output: metadataSchema },
   main_set: { input: z.object({ botId: id, threadId: id }).strict(), output: metadataSchema },
   conversation_create: { input: z.object({ botId: id, request: newThreadRequestSchema, makeMain: z.boolean().optional() }).strict(), output: z.object({ threadId: id }).strict() },
+  conversation_model_get: { input: z.object({ threadId: id }).strict(), output: z.object({ owned: z.boolean(), environmentId: id.nullable(), value: modelSelectionSchema.nullable() }).strict() },
+  conversation_model_set: { input: z.object({ threadId: id, value: modelSelectionSchema }).strict(), output: z.object({ ok: z.literal(true) }).strict() },
   conversation_assign: { input: z.object({ botId: id, threadId: id }).strict(), output: z.object({ ok: z.literal(true) }).strict() },
   state_read: { input: z.object({ botId: id, file: stateFileSchema }).strict(), output: stateOutput },
   state_update: { input: stateUpdateSchema.safeExtend({ botId: id }), output: stateOutput },
