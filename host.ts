@@ -17,6 +17,11 @@ import { bbWorkerModel } from "./runtime/bb";
 import { workspaceTools } from "./runtime/workspace";
 import { runOptChatTurn, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
 
+// Ownership proof stays in BB input for server dispatch/configuration, not user memory.
+function memoryInput<T extends { type: string; text?: string; visibility?: string }>(input: T[]): T[] {
+  return input.filter(block => !(block.type === "text" && block.visibility === "agent-only" && /^\[bb-bot-start:([a-f0-9-]{36})\]/.test(block.text ?? "")));
+}
+
 export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void } = {}) {
   const io = createBridgeIo<unknown>({ write: deps.write });
   const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string }>();
@@ -99,7 +104,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         }) : model,
         requestId: params.clientRequestId,
         background: !deps.model,
-        input: params.input.map((block) => block.type === "text" ? block.text : block.type === "localFile" || block.type === "localImage" ? `Attached ${block.type === "localImage" ? "image" : "file"} on this execution machine: ${JSON.stringify({ path: block.path, ...(block.type === "localFile" ? { name: block.name } : {}) })}. Inspect it with your file tools if the current request requires it.` : "").join("\n\n"),
+        input: memoryInput(params.input).map((block) => block.type === "text" ? block.text : block.type === "localFile" || block.type === "localImage" ? `Attached ${block.type === "localImage" ? "image" : "file"} on this execution machine: ${JSON.stringify({ path: block.path, ...(block.type === "localFile" ? { name: block.name } : {}) })}. Inspect it with your file tools if the current request requires it.` : "").join("\n\n"),
         options, onEvent,
       });
       if (!state.released) delta(params.threadId, [{ kind: "turn.boundary", providerTurnId, status: "completed" }]);
@@ -138,7 +143,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         const session = sessions.get(params.threadId);
         if (!session || session.providerThreadId !== params.providerThreadId) throw new Error("Start or resume this OptBot conversation first");
         if (active.has(params.threadId)) throw new Error("Conversation already has an active turn");
-        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"bb/codex",permissionMode:params.options.permissionMode,promptMode:params.options.promptMode,incoming:[],received:new Map([[params.clientRequestId,params.input.map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
+        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"bb/codex",permissionMode:params.options.permissionMode,promptMode:params.options.promptMode,incoming:[],received:new Map([[params.clientRequestId,memoryInput(params.input).map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
         active.set(params.threadId, state);
         io.sendResult(req.id, {});
         void run(params, state);
@@ -147,7 +152,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         if(!state||!session||session.providerThreadId!==params.providerThreadId||state.providerTurnId!==params.expectedTurnId||state.controller.signal.aborted)throw new Error("The expected OptBot turn is no longer active; queue this input for the next turn");
         if(params.options.permissionMode!==state.permissionMode||params.options.promptMode!==state.promptMode||(params.options.model!==undefined&&params.options.model!==state.model))throw new Error("Model and permission changes take effect on a fresh turn, not during steering");
         if(params.input.some(block=>block.type!=="text"))throw new Error("Mid-turn steering currently requires text input");
-        const text=params.input.map(block=>block.type==="text"?block.text:"").join("\n\n"),prior=state.received.get(params.clientRequestId);
+        const text=memoryInput(params.input).map(block=>block.type==="text"?block.text:"").join("\n\n"),prior=state.received.get(params.clientRequestId);
         if(prior!==undefined&&prior!==text)throw new Error("A client request ID cannot be reused with different input");
         if(prior===undefined){await memory(params.threadId,{action:"enqueue",requestId:params.clientRequestId,parentId:state.requestId,text},state.providerTurnId);state.received.set(params.clientRequestId,text);if(active.get(params.threadId)===state&&!state.controller.signal.aborted)state.incoming.push({id:params.clientRequestId,text});}
         io.sendResult(req.id,{});

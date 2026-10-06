@@ -3,6 +3,35 @@ import {z} from "zod";
 import type {BbPluginApi,PluginAgentConfigurationContext} from "@get-bb/plugin-sdk";
 import {bbModelRef,type WorkerPage} from "../runtime/bb";
 import type {ModelEvent} from "../runtime/turn";
+import {capResult} from "../runtime/cache";
+type NativeItem = Extract<Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>[number], {type:"item/completed"}>["data"]["item"];
+// SDK canonical items separate invocation fields from execution/result metadata.
+function nativeEvents(item:NativeItem):ModelEvent[] {
+ const id=item.id;
+ const text=(value:unknown)=>typeof value==="string"?value:JSON.stringify(value)??"";
+ const echo=(value:unknown,error=false):ModelEvent=>({kind:"echo",id,text:capResult(text(value)),...(error?{error:true}:{})});
+ const tool=(name:string,input:unknown,result:unknown,error=false):ModelEvent[]=>[{kind:"tool",id,name,input},echo(result,error)];
+ switch(item.type) {
+  case "agentMessage":return [{kind:"talk",id,text:item.text}];
+  case "reasoning":return [{kind:"thought",id,text:[...item.summary,...item.content].join("\n")}];
+  case "userMessage":case "contextCompaction":return [];
+  case "plan":return [{kind:"talk",id,text:item.text}];
+  case "planSteps":return [{kind:"talk",id,text:text({steps:item.steps,explanation:item.explanation,status:item.status})}];
+  case "toolCall":return tool(item.tool,item.arguments??{},item.error??item.result??"",item.status==="failed"||item.status==="interrupted"||!!item.error);
+  case "commandExecution":return tool(item.type,{command:item.command,cwd:item.cwd},{output:item.aggregatedOutput??"",exitCode:item.exitCode,status:item.status,approvalStatus:item.approvalStatus},item.status==="failed"||item.status==="interrupted"||(item.exitCode!==undefined&&item.exitCode!==0));
+  case "fileChange":return tool(item.type,{changes:item.changes},{status:item.status,approvalStatus:item.approvalStatus},item.status==="failed"||item.status==="interrupted");
+  case "webSearch":return tool(item.type,{queries:item.queries},item.resultText??"");
+  case "webFetch":return tool(item.type,{url:item.url,prompt:item.prompt,pattern:item.pattern},item.resultText??"");
+  case "imageView":return tool(item.type,{path:item.path},"");
+  case "imageGeneration":return tool(item.type,{prompt:item.prompt,transparentBackground:item.transparentBackground},item.error??item.result??item.path??"",item.status==="failed"||item.status==="interrupted"||!!item.error);
+  case "fileRead":return tool(item.type,{path:item.path,cmd:item.cmd},{status:item.status},item.status==="failed"||item.status==="interrupted");
+  case "search":return tool(item.type,{query:item.query,path:item.path,mode:item.mode,cmd:item.cmd},{status:item.status},item.status==="failed"||item.status==="interrupted");
+  case "backgroundTask":return item.skipTranscript?[]:tool(item.type,{description:item.description,taskType:item.taskType},{summary:item.summary,error:item.error,outputFile:item.outputFile,status:item.status,taskStatus:item.taskStatus},item.status==="failed"||item.status==="interrupted"||!!item.error);
+  case "delegation":return tool(item.type,{label:item.label,childRef:item.childRef,background:item.background},{summary:item.summary,status:item.status},item.status==="failed"||item.status==="interrupted");
+  // Extension payloads have no invocation contract; retain evidence, never invent arguments.
+  case "extension":return [echo({kind:item.kind,payload:item.payload,status:item.status},item.status==="failed"||item.status==="interrupted")];
+ }
+}
 
 export const workerInput=z.object({action:z.enum(["start","poll","stop","steer"]),key:z.string().uuid().optional(),workerId:z.string().optional(),model:z.string().optional(),prompt:z.string().optional(),instructions:z.string().optional(),permissionMode:z.enum(["full","plan","auto","accept-edits"]).optional(),reasoningLevel:z.enum(["high","low","max","medium","none","ultra","ultracode","xhigh"]).optional(),serviceTier:z.enum(["default","fast"]).optional(),cursor:z.string().regex(/^\d+$/).optional(),text:z.string().optional()}).strict();
 type Row={key:string;parent:string|null;bot:string|null;worker:string|null;fingerprint:string;instructions:string;role:"master"|"summary";status:string;pending_result:string|null};
@@ -57,12 +86,7 @@ export function createBbWorkers(bb:BbPluginApi) {
    cursor=String(row.seq);
    if(row.type==="item/completed") {
     const item=row.data.item;
-    if(item.type==="agentMessage")events.push({kind:"talk",id:item.id,text:item.text});
-    else if(item.type==="reasoning")events.push({kind:"thought",id:item.id,text:[...item.summary,...item.content].join("\n")});
-    else if(item.type!=="userMessage") {
-     events.push({kind:"tool",id:item.id,name:item.type,input:item});
-     events.push({kind:"echo",id:item.id,text:JSON.stringify(item)});
-    }
+    events.push(...nativeEvents(item));
    } else if(row.type==="turn/completed") {
     const result:ModelEvent={kind:"result",success:row.data.status==="completed",text:row.data.status==="completed"?"":row.data.error?.message??`BB worker ${row.data.status}`};
     db.prepare("UPDATE optbot_workers SET pending_result=? WHERE worker=?").run(JSON.stringify(result),workerId);

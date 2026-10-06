@@ -6,14 +6,14 @@ const instances: Awaited<ReturnType<typeof backend>>[] = [];
 afterEach(async () => { await Promise.all(instances.splice(0).map(host => host.harness.lifecycle.dispose())); });
 async function setup() { const host = await backend(); instances.push(host); return host; }
 function provider(host: Awaited<ReturnType<typeof backend>>) {
-  const value = host.harness.inspection.registrations.mentionProviders.find(provider => provider.id === "bots");
+  const value = host.harness.inspection.registrations.mentionProviders.find(provider => provider.id === "optbots");
   if (!value) throw new Error("Missing Bots mention provider"); return value;
 }
 const context = (query: string) => ({ trigger: "@" as const, query, projectId: null, threadId: null });
 
 it("registers bots under the native @ trigger and Bots group", async () => {
   const host = await setup(); const p = provider(host);
-  expect(p.label).toBe("Bots"); expect(p.triggers).toEqual(["@"]);
+  expect(p.label).toBe("OptBots"); expect(p.triggers).toEqual(["@"]);
   expect(await p.search({ ...context("a"), trigger: "#" })).toEqual([]);
 });
 
@@ -57,7 +57,7 @@ it("resolves stable IDs using current public metadata, not private state or a st
   const before = host.store.require(bot.id); const sdkCalls = host.harness.inspection.sdk.calls.length;
   const result = await provider(host).resolve(bot.id);
   expect(result.context).toContain('"name":"Renamed bot"'); expect(result.context).toContain('"role":"Reviewer"');
-  expect(result.context).toContain(`bb bots message '${bot.id}' '<message>'`);
+  expect(result.context).toContain(`bb optbot message '${bot.id}' '<message>'`);
   expect(result.context).toContain("does not send a message"); expect(result.context).toContain("not your identity");
   expect(result.context).not.toContain("PRIVATE_"); expect(result.context.length).toBeLessThan(1500);
   await provider(host).search(context("renamed"));

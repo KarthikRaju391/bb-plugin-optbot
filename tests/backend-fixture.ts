@@ -14,7 +14,7 @@ export function project(id = "project", hostId = "host-project", path = `/projec
   return { id, name: `Project ${id}`, kind: "standard", gitRemoteUrl: null, createdAt: 1, updatedAt: 1, sources: [{ id: `source-${id}`, projectId: id, hostId, path, type: "local_path", isDefault: true, createdAt: 1, updatedAt: 1 }] };
 }
 export function request(projectId = "project"): NewThreadRequest {
-  return { projectId, providerId: "pi", model: "test", reasoningLevel: "high", permissionMode: "accept-edits", executionInputSources: { providerId: "explicit", model: "explicit", reasoningLevel: "explicit", permissionMode: "explicit" }, environment: projectId === PERSONAL_ID ? { type: "host", hostId: "host-home", workspace: { type: "personal" } } : { type: "project-default" }, input: [{ type: "text", text: "Review @Main", mentions: [{ start: 7, end: 12, resource: { kind: "thread", label: "Main", threadId: "main" } }] }, { type: "localFile", path: "attachments/spec.md", name: "spec.md" }] };
+  return { projectId, providerId: "optbot", model: "sonnet", reasoningLevel: "medium", permissionMode: "full", executionInputSources: { providerId: "explicit", model: "explicit", reasoningLevel: "explicit", permissionMode: "explicit" }, environment: projectId === PERSONAL_ID ? { type: "host", hostId: "host-home", workspace: { type: "personal" } } : { type: "project-default" }, input: [{ type: "text", text: "Review @Main", mentions: [{ start: 7, end: 12, resource: { kind: "thread", label: "Main", threadId: "main" } }] }, { type: "localFile", path: "attachments/spec.md", name: "spec.md" }] };
 }
 
 export async function backend(initialProjects: Project[] = [project()]) {
@@ -29,7 +29,7 @@ export async function backend(initialProjects: Project[] = [project()]) {
   const get = (hostId: string, path: string) => files.get(key(hostId, path));
   let sequence = 0;
   let failSpawn = false;
-  let host = createFakePluginHost({ pluginId: "bots-sidebar", sdk: {
+  let host = createFakePluginHost({ pluginId: "optbot", sdk: {
     projects: {
       list: async (args) => args?.includePersonal ? [...projects, personal] : projects,
       get: async ({ projectId }) => { const found = [...projects, personal].find((p) => p.id === projectId); if (!found) throw new Error("Project missing"); return found; },
@@ -61,7 +61,7 @@ export async function backend(initialProjects: Project[] = [project()]) {
         if (!args.sendAt) {
           const blocks = "input" in args ? args.input! : [];
           await host.harness.inspection.registrations.hooks["message.dispatch"]!(makeMessageDispatchHookContext({ thread: value, project: { id: args.projectId }, input: { blocks, text: "" }, originPluginId: host.bb.pluginId, origin: "plugin" }));
-          const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: value.id }, project: { id: args.projectId, kind: args.projectId === PERSONAL_ID ? "personal" : "standard" } }));
+          const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: value.id }, project: { id: args.projectId, kind: args.projectId === PERSONAL_ID ? "personal" : "standard" } }));
           initialConfigurations.push({ threadId: value.id, instructions: config.instructions, tools: config.tools.map((tool) => tool.name) });
         }
         return value;

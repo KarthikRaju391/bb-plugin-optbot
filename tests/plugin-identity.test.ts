@@ -9,16 +9,16 @@ async function setup() { const host = await backend(); instances.push(host); ret
 
 it("derives the non-conflicting bots-sidebar ID from its package name", () => {
   const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  expect(manifest.name).toBe("bb-plugin-bots-sidebar");
-  expect(manifest.name.replace(/^bb-plugin-/, "")).toBe("bots-sidebar");
-  expect(manifest.bb.name).toBe("Bots Sidebar");
+  expect(manifest.name).toBe("bb-plugin-optbot");
+  expect(manifest.name.replace(/^bb-plugin-/, "")).toBe("optbot");
+  expect(manifest.bb.name).toBe("OptBot");
 });
 
 it("attributes new bot conversations to the new plugin ID before their first turn", async () => {
   const host = await setup(); const bot = await host.create("Atlas");
-  expect(host.bb.pluginId).toBe("bots-sidebar");
+  expect(host.bb.pluginId).toBe("optbot");
   const result = await host.harness.behavior.callRpc("conversation_create", { botId: bot.id, request: request() }) as { threadId: string };
-  expect(host.threads.get(result.threadId)?.originPluginId).toBe("bots-sidebar");
+  expect(host.threads.get(result.threadId)?.originPluginId).toBe("optbot");
   expect(host.store.owner(result.threadId)).toBe(bot.id);
   expect(host.initialConfigurations.at(-1)?.instructions).toContain("You are Atlas.");
 });
@@ -32,9 +32,9 @@ it("preserves migrated bindings and inheritance for historical bots-origin threa
   const child = makeThreadResponse({ id: "child", projectId: "project", parentThreadId: legacy.id, originPluginId: null, createdAt: Date.now() + 1 });
   host.threads.set(child.id, child); await host.harness.behavior.emitThreadEvent("thread.created", { thread: child });
   expect(host.store.owner(legacy.id)).toBe(member.id); expect(host.store.owner(child.id)).toBe(member.id);
-  const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: legacy.id }, project: { id: "project" } }));
+  const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: legacy.id }, project: { id: "project" } }));
   expect(config.instructions).toContain("You are Historical bot.");
-  expect(config.tools.map(tool => tool.name)).toEqual(["bot_read_state", "bot_update_state"]);
+  expect(config.tools.map(tool => tool.name)).toEqual(["optbot_chat", "optbot_memory", "optbot_worker", "optbot_read_state", "optbot_update_state"]);
 });
 
 it("does not trust another plugin named bots as a new explicit start", async () => {

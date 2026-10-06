@@ -25,9 +25,9 @@ it("routes newly created project conversations to its one owner before agent con
   const thread = fresh(host, "ordinary");
   expect((await host.harness.behavior.emitThreadEvent("thread.created", { thread })).errors).toEqual([]);
   expect(host.store.owner(thread.id)).toBe(bot.id);
-  const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: thread.id }, project: { id: "project" } }));
+  const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: thread.id }, project: { id: "project" } }));
   expect(config.instructions).toContain("You are Atlas.");
-  expect(config.tools.map((tool) => tool.name)).toContain("bot_update_state");
+  expect(config.tools.map((tool) => tool.name)).toContain("optbot_update_state");
   const list = await host.harness.behavior.callRpc("bots_list", null) as { projectOwners: unknown[] };
   expect(list.projectOwners).toEqual([{ projectId: "project", botId: bot.id }]);
   expect(host.store.require(bot.id).mainThreadId).toBeNull();
@@ -79,7 +79,7 @@ it("configuration reads cannot preempt a new fork's atomic binding and membershi
   const host = await setup(); const owner = await host.create("Atlas"); const member = await host.create("Nova", []); await role(host, owner.id, "own");
   const root = await host.harness.behavior.callRpc("conversation_create", { botId: member.id, request: request(PERSONAL_ID) }) as { threadId: string };
   const fork = fresh(host, "config-first-fork", { sourceThreadId: root.threadId, status: "idle" });
-  const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: fork.id, sourceThreadId: root.threadId }, project: { id: "project" } }));
+  const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: fork.id, sourceThreadId: root.threadId }, project: { id: "project" } }));
   expect(config.instructions).toContain("You are Nova.");
   expect(host.store.owner(fork.id)).toBeNull();
   await host.harness.behavior.emitThreadEvent("thread.created", { thread: fork });

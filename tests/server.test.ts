@@ -45,7 +45,7 @@ describe("private bot identities", () => {
     expect(host.initialConfigurations[0]?.instructions).not.toContain("You are Nova.");
     expect(host.initialConfigurations[1]?.instructions).toContain("You are Nova.");
     expect(host.initialConfigurations[0]?.instructions).not.toContain(host.stateDirectory(first.id));
-    expect(host.initialConfigurations[0]?.tools).toEqual(["bot_read_state", "bot_update_state"]);
+    expect(host.initialConfigurations[0]?.tools).toEqual(["optbot_chat", "optbot_memory", "optbot_worker", "optbot_read_state", "optbot_update_state"]);
     const bindings = (await host.harness.behavior.callRpc("bots_list", null) as { threadBindings: unknown[] }).threadBindings;
     expect(bindings).toEqual(expect.arrayContaining([{ threadId: a.threadId, botId: first.id }, { threadId: b.threadId, botId: second.id }]));
     const submitted = host.harness.inspection.sdk.callsTo("threads.spawn")[0]![0] as { input: unknown[]; environment: unknown; executionInputSources: unknown };
@@ -53,7 +53,7 @@ describe("private bot identities", () => {
     expect(submitted.executionInputSources).toEqual(input.executionInputSources);
     expect(submitted.environment).toEqual(input.environment);
     expect(submitted.input.at(-1)).toMatchObject({ type: "text", visibility: "agent-only" });
-    const unrelated = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: "unrelated" }, project: { id: projectId } }));
+    const unrelated = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: "unrelated" }, project: { id: projectId } }));
     expect(unrelated.instructions).toBeNull(); expect(unrelated.tools).toEqual([]);
     expect(host.harness.inspection.sdk.callsTo("projects.create")).toEqual([]);
   });
@@ -64,7 +64,7 @@ describe("private bot identities", () => {
     expect(host.initialConfigurations).toEqual([]);
     expect(host.harness.inspection.sdk.callsTo("threads.spawn")[0]?.[0]).toMatchObject({ sendAt: when, projectId: PERSONAL_ID });
     await host.reload();
-    const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: created.threadId }, project: { id: PERSONAL_ID } }));
+    const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: created.threadId }, project: { id: PERSONAL_ID } }));
     expect(config.instructions).toContain("You are Atlas.");
     expect(host.store.require(bot.id).mainThreadId).toBe(created.threadId);
   });
@@ -77,7 +77,7 @@ describe("private bot identities", () => {
     const sent = host.harness.inspection.sdk.callsTo("threads.spawn")[0]![0] as { input: ReturnType<typeof request>["input"] };
     await host.reload();
     await host.harness.inspection.registrations.hooks["message.dispatch"]!(makeMessageDispatchHookContext({ thread: pending, input: { blocks: sent.input } }));
-    const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: pending.id }, project: { id: PERSONAL_ID } }));
+    const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: pending.id }, project: { id: PERSONAL_ID } }));
     expect(config.instructions).toContain("You are Atlas.");
   });
 
@@ -86,9 +86,9 @@ describe("private bot identities", () => {
     const created = await host.harness.behavior.callRpc("conversation_create", { botId: bot.id, request: request(PERSONAL_ID) }) as { threadId: string };
     const child = makeThreadResponse({ id: "child", parentThreadId: created.threadId, projectId: "other-project" }); host.threads.set(child.id, child);
     await host.harness.behavior.emitThreadEvent("thread.created", { thread: child });
-    const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: child.id, parentThreadId: created.threadId }, project: { id: "other-project" } }));
+    const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: child.id, parentThreadId: created.threadId }, project: { id: "other-project" } }));
     expect(config.instructions).toContain("You are Atlas.");
-    const fork = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: "fork", sourceThreadId: child.id }, project: { id: "project" } }));
+    const fork = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: "fork", sourceThreadId: child.id }, project: { id: "project" } }));
     expect(fork.instructions).toContain("You are Atlas.");
   });
 
@@ -108,15 +108,15 @@ describe("private state data", () => {
     const host = await setup(); const bot = await host.create();
     const created = await host.harness.behavior.callRpc("conversation_create", { botId: bot.id, request: request() }) as { threadId: string };
     host.offline.add("host-home"); const ctx = { threadId: created.threadId, projectId: "project" };
-    const before = asJSON(await host.harness.behavior.callAgentTool("bot_read_state", { target: "memory" }, ctx));
+    const before = asJSON(await host.harness.behavior.callAgentTool("optbot_read_state", { target: "memory" }, ctx));
     expect(before.state.sha256).toBe(hash("")); expect(before.state).not.toHaveProperty("path");
-    const result = asJSON(await host.harness.behavior.callAgentTool("bot_update_state", { target: "memory", action: "append", fact: "Prefer focused changes." }, ctx));
+    const result = asJSON(await host.harness.behavior.callAgentTool("optbot_update_state", { target: "memory", action: "append", fact: "Prefer focused changes." }, ctx));
     expect(result.state.sha256).toBe(hash("- Prefer focused changes.\n"));
     expect(result.state).not.toHaveProperty("path");
     expect(await readFile(join(host.stateDirectory(bot.id), "MEMORY.md"), "utf8")).toBe("- Prefer focused changes.\n");
     expect(host.harness.inspection.sdk.callsTo("files.write")).toEqual([]);
     expect(host.harness.inspection.sdk.callsTo("hosts.directory")).toEqual([]);
-    const identity = asJSON(await host.harness.behavior.callAgentTool("bot_read_state", { target: "identity" }, ctx));
+    const identity = asJSON(await host.harness.behavior.callAgentTool("optbot_read_state", { target: "identity" }, ctx));
     expect(identity.state).not.toHaveProperty("homePath"); expect(identity.state).not.toHaveProperty("hostId");
   });
 
@@ -220,8 +220,8 @@ describe("private state data", () => {
     expect(staleOmitted).toMatchObject({ role: "Archivist", memory: "- Keep me.\n", settings: { keep: true } });
     const created = await host.harness.behavior.callRpc("conversation_create", { botId: bot.id, request: request() }) as { threadId: string };
     const ctx = { threadId: created.threadId, projectId: "project" };
-    const identity = asJSON(await host.harness.behavior.callAgentTool("bot_read_state", { target: "identity" }, ctx));
-    const result = asJSON(await host.harness.behavior.callAgentTool("bot_update_state", { target: "identity", action: "set", expectedRevision: identity.revision, name: "Native" }, ctx));
+    const identity = asJSON(await host.harness.behavior.callAgentTool("optbot_read_state", { target: "identity" }, ctx));
+    const result = asJSON(await host.harness.behavior.callAgentTool("optbot_update_state", { target: "identity", action: "set", expectedRevision: identity.revision, name: "Native" }, ctx));
     expect(result.state.name).toBe("Native");
     expect(host.store.require(bot.id)).toMatchObject({ name: "Native", memory: "- Keep me.\n", settings: { keep: true } });
   });
@@ -264,7 +264,7 @@ describe("v2 state import", () => {
     expect(host.store.require(old.id).memory).toBe("- Stable fact.\n");
     expect(host.harness.inspection.sdk.callsTo("files.write")).toEqual([]);
     expect(host.harness.inspection.sdk.callsTo("projects.create")).toEqual([]);
-    const unknown = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: "unassigned-legacy-home" }, project: { id: "old-home" } }));
+    const unknown = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: "unassigned-legacy-home" }, project: { id: "old-home" } }));
     expect(unknown.tools).toEqual([]);
   });
 
@@ -283,16 +283,16 @@ it("injects fixed guidance, SOUL and all compliant memory, without archived bot 
   const host = await setup(); const bot = await host.create();
   host.store.save({ ...bot, name: "N".repeat(120), role: "R".repeat(80), soul: "Unique soul " + "s".repeat(4084), agents: "Archived instructions must not run", memory: "m".repeat(3000) });
   host.store.bind("configured", bot.id);
-  const configuration = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: "configured" } }));
+  const configuration = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: "optbot" }, thread: { id: "configured" } }));
   expect(configuration.instructions).toContain("Unique soul");
   expect(configuration.instructions).toContain("m".repeat(3000));
   expect(configuration.instructions!.length).toBeLessThanOrEqual(4096);
-  expect(configuration.instructions).toContain("[Truncated: use bot_read_state for complete state.]");
-  const guidance = host.harness.inspection.registrations.agentTools.find(tool => tool.name === "bot_read_state")!.instructions!;
-  expect(guidance).toContain('"action":"overwrite"');
+  expect(configuration.instructions).toContain("[Truncated: use optbot_read_state for complete state.]");
+  const guidance = host.harness.inspection.registrations.agentTools.find(tool => tool.name === "optbot_read_state")!.instructions!;
+  expect(guidance).toContain("optbot_memory");
   expect(configuration.instructions).not.toContain("Archived instructions must not run");
   expect(configuration.instructions).not.toContain("## Bot operating instructions");
-  expect(guidance).toContain("Current workspace/project AGENTS.md still applies");
+  expect(guidance).toContain("Current project AGENTS.md remains authoritative");
   const before = host.store.require(bot.id);
   for (const method of ["state_read", "state_update"]) await expect(host.harness.behavior.callRpc(method, { botId: bot.id, file: "AGENTS.md", ...(method === "state_update" ? { content: "changed", expectedSha256: hash("") } : {}) })).rejects.toThrow();
   expect(host.store.require(bot.id)).toEqual(before);

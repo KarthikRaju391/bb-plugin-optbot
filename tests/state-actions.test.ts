@@ -30,17 +30,17 @@ async function scope() {
   const bot = await host.create();
   const { threadId } = await host.harness.behavior.callRpc("conversation_create", { botId: bot.id, request: request() }) as { threadId: string };
   const ctx = { threadId, projectId: "project" };
-  const read = async (target: string) => JSON.parse(await host.harness.behavior.callAgentTool("bot_read_state", { target }, ctx) as string);
-  const update = async (change: unknown) => JSON.parse(await host.harness.behavior.callAgentTool("bot_update_state", change, ctx) as string);
+  const read = async (target: string) => JSON.parse(await host.harness.behavior.callAgentTool("optbot_read_state", { target }, ctx) as string);
+  const update = async (change: unknown) => JSON.parse(await host.harness.behavior.callAgentTool("optbot_update_state", change, ctx) as string);
   return { host, bot, read, update };
 }
 
 it("exposes object-root native schemas with target/action required", async () => {
   const { host } = await scope();
   const tools = host.harness.inspection.registrations.agentTools;
-  expect(tools.map((tool) => tool.name)).toEqual(["bot_read_state", "bot_update_state"]);
+  expect(tools.map((tool) => tool.name)).toEqual(["optbot_chat", "optbot_memory", "optbot_worker", "optbot_read_state", "optbot_update_state"]);
   for (const tool of tools) expect((tool.inputSchema as { type: string }).type).toBe("object");
-  expect((tools[1]!.inputSchema as { required: string[] }).required).toEqual(expect.arrayContaining(["target", "action"]));
+  expect((tools.find(tool => tool.name === "optbot_update_state")!.inputSchema as { required: string[] }).required).toEqual(expect.arrayContaining(["target", "action"]));
   expect((tools[0]!.inputSchema as { properties: object }).properties).not.toHaveProperty("file");
 });
 
@@ -159,9 +159,9 @@ it("allows exactly 3000 memory characters and rejects overflow with compaction i
   const full = await update({ target: "memory", action: "append", fact: "a" }); // newline + '- a\n'
   expect(full.state).toMatchObject({ characters: 3000, maxCharacters: 3000 });
   const before = host.store.require(bot.id);
-  await expect(update({ target: "memory", action: "append", fact: "b" })).rejects.toThrow(/3000.*bot_read_state.*overwrite.*expectedSha256/);
+  await expect(update({ target: "memory", action: "append", fact: "b" })).rejects.toThrow(/3000.*optbot_read_state.*overwrite.*expectedSha256/);
   expect(host.store.require(bot.id)).toEqual(before);
-  await expect(update({ target: "memory", action: "overwrite", content: "x".repeat(3001), expectedSha256: full.state.sha256 })).rejects.toThrow(/3000.*bot_read_state.*overwrite/);
+  await expect(update({ target: "memory", action: "overwrite", content: "x".repeat(3001), expectedSha256: full.state.sha256 })).rejects.toThrow(/3000.*optbot_read_state.*overwrite/);
   expect(host.store.require(bot.id)).toEqual(before);
 });
 
@@ -169,7 +169,7 @@ it("overwrites only the memory read, supports clearing, and requires a fresh has
   const { read, update } = await scope();
   const old = await read("memory");
   await update({ target: "memory", action: "append", fact: "Newer fact" });
-  await expect(update({ target: "memory", action: "overwrite", content: "Lost fact", expectedSha256: old.state.sha256 })).rejects.toThrow(/Memory changed.*bot_read_state/);
+  await expect(update({ target: "memory", action: "overwrite", content: "Lost fact", expectedSha256: old.state.sha256 })).rejects.toThrow(/Memory changed.*optbot_read_state/);
   await expect(update({ target: "memory", action: "overwrite", content: "Missing hash" })).rejects.toThrow(/expectedSha256/);
   const latest = await read("memory");
   expect((await update({ target: "memory", action: "overwrite", content: latest.state.content, expectedSha256: latest.state.sha256 })).changed).toBe(false);

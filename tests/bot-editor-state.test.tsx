@@ -44,7 +44,7 @@ function file(dialog: HTMLElement, name: "SOUL.md" | "MEMORY.md" | "settings.jso
 
 it("puts the three active logical files in Edit bot with one Save and no separate state action", async () => {
   const { slot, dialog, onNavigate } = await mount();
-  expect(within(dialog).getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Setup", "Instructions", "State", "Projects · 1", "Appearance"]);
+  expect(within(dialog).getAllByRole("tab").map(tab => tab.textContent)).toEqual(["Setup", "Instructions", "State", "Memory", "Projects · 1", "Appearance"]);
   expect(file(dialog, "SOUL.md").value).toBe("Fresh private identity");
   expect(file(dialog, "MEMORY.md").value).toBe("- A private fact.\n");
   expect(JSON.parse(file(dialog, "settings.json").value)).toEqual({ style: "concise" });

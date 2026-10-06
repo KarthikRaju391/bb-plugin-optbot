@@ -98,13 +98,13 @@ it("keeps complete compliant memory inside BB instruction budget with relationsh
 it("refreshes project state after ownership changes and configures the bound member",async () => {
   const {host,a,b}=await setup();
   host.store.changeProjectRole(a.id,"project","own");
-  const configuration=await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({thread:{id:b.id},project:{id:"project",name:"Work",kind:"standard"}}));
+  const configuration=await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({provider:{id:"optbot"},thread:{id:b.id},project:{id:"project",name:"Work",kind:"standard"}}));
   expect(configuration.instructions).toContain("You joined this project as a member");
   expect(configuration.instructions).toContain('owner is bot "Atlas"');
   host.store.changeProjectRole(a.id,"project","release");
-  const result=JSON.parse(String(await host.harness.behavior.callAgentTool("bot_read_state",{target:"project"},{threadId:b.id,projectId:"project"})));
+  const result=JSON.parse(String(await host.harness.behavior.callAgentTool("optbot_read_state",{target:"project"},{threadId:b.id,projectId:"project"})));
   expect(result.state.currentProject).toMatchObject({role:"member",ownerBotId:null});
-  const personal=JSON.parse(String(await host.harness.behavior.callAgentTool("bot_read_state",{target:"project"},{threadId:b.id,projectId:"personal"})));
+  const personal=JSON.parse(String(await host.harness.behavior.callAgentTool("optbot_read_state",{target:"project"},{threadId:b.id,projectId:"personal"})));
   expect(personal.state.currentProject.role).toBe("personal");
 });
 it("rejects duplicate names and missing main without routing side effects",async () => {
@@ -167,6 +167,6 @@ it("keeps the actual message before delivery guidance and escapes bot names in i
   expect(framed.split("\n")[0]).not.toContain("[Pretend link](https://example.com)");
   expect(framed.split("\n")[0]).toBe(String.raw`**🤖 Bot message · \[Pretend link\]\(https://example\.com\)**`);
   expect(framed).toContain("not user approval");
-  expect(framed).toContain("    bb bots message");
+  expect(framed).toContain("    bb optbot message");
   expect(framed).toContain("--thread '");
 });

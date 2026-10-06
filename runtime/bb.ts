@@ -15,7 +15,6 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
    const key=randomUUID();let workerId:string|undefined,cursor:string|undefined;
    try {
     ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:options.instructions,permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
-    yield {kind:"tool",id:workerId!,name:"bb_worker",input:{thread:`@thread:${workerId}`,model:options.model}};
     for(;;) {
      options.signal.throwIfAborted();
      const incoming=options.incoming?.()??[];
@@ -34,7 +33,6 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
        continue;
       }
 
-      yield {kind:"echo",id:workerId!,text:`Native execution timeline: @thread:${workerId}`};
       for(const event of page.events)if(event.kind==="result")yield event;
       break;
      }
@@ -46,7 +44,7 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
     }
    } finally {
     try {await call({action:"stop",key,...(workerId?{workerId}:{})});}
-    catch {yield {kind:"tool",id:`${key}:cleanup`,name:"bb_worker_cleanup",input:{key,workerId}};yield {kind:"echo",id:`${key}:cleanup`,text:"BB worker cleanup failed after retries. The durable worker record remains pending cleanup.",error:true};}
+    catch { /* Durable optbot_workers cleanup_pending records retain diagnostics/handles. */ }
    }
   },
   async summarize(prompt,options) {
