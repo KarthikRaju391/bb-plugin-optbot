@@ -35,7 +35,21 @@ function nativeEvents(item:NativeItem):ModelEvent[] {
 
 export const workerInput=z.object({action:z.enum(["start","poll","stop","steer"]),key:z.string().uuid().optional(),workerId:z.string().optional(),model:z.string().optional(),prompt:z.string().optional(),instructions:z.string().optional(),permissionMode:z.enum(["full","plan","auto","accept-edits"]).optional(),reasoningLevel:z.enum(["high","low","max","medium","none","ultra","ultracode","xhigh"]).optional(),serviceTier:z.enum(["default","fast"]).optional(),cursor:z.string().regex(/^\d+$/).optional(),text:z.string().optional()}).strict();
 type Row={key:string;parent:string|null;bot:string|null;worker:string|null;fingerprint:string;instructions:string;role:"master"|"summary";status:string;pending_result:string|null};
-export function createBbWorkers(bb:BbPluginApi) {
+// BB's server can freeze for seconds (synchronous SQLite) and drop a connection mid-request.
+// A running worker is unaffected, so read-only checks retry instead of failing the turn.
+const NETWORK=/fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|UND_ERR|other side closed/i;
+function transientNetworkError(error:unknown) {
+ const cause=(error as {cause?:{code?:string;message?:string}})?.cause;
+ return error instanceof Error&&(NETWORK.test(error.message)||NETWORK.test(String(cause?.code??""))||NETWORK.test(String(cause?.message??"")));
+}
+export async function retryReads<T>(read:()=>Promise<T>,delays:readonly number[]=[250,1000,3000,8000],sleep=(ms:number)=>new Promise<void>(resolve=>setTimeout(resolve,ms))):Promise<T> {
+ for(let attempt=0;;attempt++) {
+  try {return await read();}
+  catch(error) {if(!transientNetworkError(error)||attempt>=delays.length)throw error;await sleep(delays[attempt]!);}
+ }
+}
+export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly number[]}={}) {
+ const read=<T,>(fn:()=>Promise<T>)=>retryReads(fn,options.retryDelays);
  const db=bb.storage.database();
  db.exec("CREATE TABLE IF NOT EXISTS optbot_workers (key TEXT PRIMARY KEY,parent TEXT,bot TEXT,worker TEXT UNIQUE,fingerprint TEXT NOT NULL,instructions TEXT NOT NULL,role TEXT NOT NULL,status TEXT NOT NULL)");
  if(!(db.prepare("PRAGMA table_info(optbot_workers)").all() as {name:string}[]).some(column=>column.name==="pending_result"))db.exec("ALTER TABLE optbot_workers ADD COLUMN pending_result TEXT");
@@ -80,7 +94,7 @@ export function createBbWorkers(bb:BbPluginApi) {
   locks.set(args.key,run);try{return await run;}finally{if(locks.get(args.key)===run)locks.delete(args.key);}
  }
  async function poll(workerId:string,cursor?:string):Promise<WorkerPage> {return locked(`worker:${workerId}`,async()=>{
-  const rows=await bb.sdk.threads.events.list({threadId:workerId,afterSeq:cursor,order:"asc",limit:"100",types:["item/completed","turn/completed","system/thread/interrupted"]});
+  const rows=await read(()=>bb.sdk.threads.events.list({threadId:workerId,afterSeq:cursor,order:"asc",limit:"100",types:["item/completed","turn/completed","system/thread/interrupted"]}));
   const events:ModelEvent[]=[];let done=false;
   for(const row of rows) {
    cursor=String(row.seq);
@@ -95,8 +109,8 @@ export function createBbWorkers(bb:BbPluginApi) {
    }
   }
   if(rows.length<100) {
-   const thread=await bb.sdk.threads.get({threadId:workerId});
-   const queued=thread.queuedMessageCount??(await bb.sdk.threads.queuedMessages.list({threadId:workerId})).length;
+   const thread=await read(()=>bb.sdk.threads.get({threadId:workerId}));
+   const queued=thread.queuedMessageCount??(await read(()=>bb.sdk.threads.queuedMessages.list({threadId:workerId}))).length;
    const row=find(workerId);
    const failed=row?.pending_result?JSON.parse(row.pending_result) as Extract<ModelEvent,{kind:"result"}>:null;
    if(failed&&!failed.success&&(thread.status==="idle"||thread.status==="error")&&queued===0){events.push(failed);done=true;}
@@ -104,7 +118,7 @@ export function createBbWorkers(bb:BbPluginApi) {
    if(!done&&thread.status==="idle" && queued===0) {
     if(row?.pending_result) {
      const result=JSON.parse(row.pending_result) as Extract<ModelEvent,{kind:"result"}>;
-     if(result.success)result.text=(await bb.sdk.threads.output({threadId:workerId})).output??events.filter(e=>e.kind==="talk").at(-1)?.text??"";
+     if(result.success)result.text=(await read(()=>bb.sdk.threads.output({threadId:workerId}))).output??events.filter(e=>e.kind==="talk").at(-1)?.text??"";
      events.push(result);done=true;
     } else if(Date.now()-thread.updatedAt>2000)throw new Error(`Native worker ended without a completion: @thread:${workerId}`);
    }
@@ -136,7 +150,7 @@ export function createBbWorkers(bb:BbPluginApi) {
   if(raw.action==="start") {
    if(!raw.key||!raw.model||raw.prompt===undefined)throw new Error("Worker start requires key, model and prompt");
    const {model,reasoningLevel,serviceTier}=raw;
-   const thread=await bb.sdk.threads.get({threadId:parent});
+   const thread=await read(()=>bb.sdk.threads.get({threadId:parent}));
    if(!thread.environmentId)throw new Error("Parent conversation has no execution environment");
    return start({key:raw.key,model,prompt:raw.prompt,instructions:raw.instructions??"",// OptBot always runs workers with Full access, whatever the model (user decision).
    permissionMode:raw.permissionMode==="plan"?"plan":"full",...(reasoningLevel?{reasoningLevel}:{}),...(serviceTier?{serviceTier}:{}),parent,bot,projectId:thread.projectId,environment:{type:"reuse",environmentId:thread.environmentId},role:"master"});
