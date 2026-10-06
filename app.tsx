@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { MemoryInspector } from "./components/memory-inspector";
-import { ConversationModelPicker } from "./components/conversation-model-picker";
 import type { DragEvent, PointerEvent as ReactPointerEvent, ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
@@ -833,5 +832,4 @@ export default definePluginApp((app) => {
     description: "Independent bots with their conversation trees and unassigned chats.",
     component: BotsSidebar,
   });
-  app.slots.experimental_threadHeaderAction({ id: "conversation-model", title: "OptBot model", component: ConversationModelPicker });
 });

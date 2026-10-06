@@ -55,11 +55,14 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   }
   bb.providers.register({
     id: "optbot", displayName: "OptBot", icon: "./assets/bot.svg", family: "optbot",
-    maintenance: { health: false, usage: false, installation: false },
+    // Listed only where "installed"; the bridge always answers not_installed, so OptBot stays out of
+    // BB's global picker while its own conversations keep their composer and catalog.
+    experimental_visibility: "installed",
+    maintenance: { health: true, usage: false, installation: false },
     composerActions: ["plan"],
     strings: { signInHint: "Use an installed BB provider with its existing authentication.", expiredHint: "Renew the selected BB provider's authentication.", installUrl: "https://getbb.app", brandPrefix: "OptBot ", planModeCopy: "Native worker Plan mode is not yet supported." },
-    capabilities: { supportsServiceTier: true, supportsNativeUserQuestion: false, fork: "none", supportsManualCompaction: false, supportsThreadArchive: false, supportsThreadRename: false, permissionModes: ["full"], reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max", "ultra"] },
-    models: { scope: "workspace" },
+    capabilities: { supportsServiceTier: true, supportsNativeUserQuestion: false, fork: "none", supportsManualCompaction: false, supportsThreadArchive: false, supportsThreadRename: false, permissionModes: ["full"], reasoningLevels: ["none", "low", "medium", "high", "xhigh", "ultracode", "max", "ultra"] },
+    models: { scope: "host" },
   });
   const chatSchema = z.object({
     action: z.enum(["begin", "heartbeat", "checkpoint", "record", "work", "merge", "view", "finish", "settled", "zoom", "date", "input", "enqueue"]),

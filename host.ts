@@ -14,6 +14,7 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { apiModel } from "./runtime/models";
 import { bbWorkerModel } from "./runtime/bb";
+import { cachedCatalog, type Catalog } from "./runtime/bb-catalog";
 import { workspaceTools } from "./runtime/workspace";
 import { runOptChatTurn, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
 
@@ -27,7 +28,8 @@ function memoryInput<T extends { type: string; text?: string; visibility?: strin
 const RETRYABLE_MEMORY = new Set(["heartbeat", "record", "input", "checkpoint", "view", "settled", "work", "merge", "zoom", "date", "enqueue"]);
 class ToolTimeout extends Error {}
 
-export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void; toolTimeoutMs?: number } = {}) {
+export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void; toolTimeoutMs?: number; catalog?: () => Promise<Catalog> } = {}) {
+  const catalog = deps.catalog ?? cachedCatalog();
   const io = createBridgeIo<unknown>({ write: deps.write });
   const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string }>();
   type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:{id:string;text:string}[];received:Map<string,string>};
@@ -137,11 +139,15 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         const params = initializeParamsSchema.parse(req.params);
         if (params.protocolVersion !== 2) throw new Error("OptBot requires provider bridge protocol 2");
         io.sendResult(req.id, { protocolVersion: 2, capabilities: { sessionRestore: true, fork: "none", grammarVersions: [2, 3], approvalEnforcedBy: "provider", steerMode: "inject", skills: { configure: false } } });
+        void catalog().catch(() => {}); // warm: building it queries every installed provider
       } else if (req.method === "model/list") {
         modelListParamsSchema.parse(req.params);
-        // BB exposes selectedOnlyModels in "More models", too. Do not mirror
-        // native choices in either list; creation supplies the chosen identity.
-        io.sendResult(req.id, { models: [], selectedOnlyModels: [] });
+        // The composer picker in OptBot conversations lists these: installed BB providers' models as bb/<provider>/<model>.
+        io.sendResult(req.id, await catalog());
+      } else if (req.method === "provider/health") {
+        // With experimental_visibility "installed", not_installed keeps OptBot out of BB's global new-thread
+        // picker and other threads' handoff tabs. OptBot conversations still run; they start from its sidebar.
+        io.sendResult(req.id, { supported: true, health: { status: "not_installed", statusMessage: "OptBot conversations start from the OptBot sidebar.", accountEmail: null, canInstall: false, canUpdate: false, installedVersion: null, loginCommand: null, minimumSupportedVersion: null, planLabel: null } });
       } else if (req.method === "thread/start" || req.method === "thread/resume") {
         const params = req.method === "thread/start" ? threadStartParamsSchema.parse(req.params) : threadResumeParamsSchema.parse(req.params);
         if (active.has(params.threadId)) throw new Error("Cannot reconstruct an active OptBot conversation");
