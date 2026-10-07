@@ -3,6 +3,11 @@ import { experimental_resolveExecutablePath } from "@get-bb/plugin-sdk/provider-
 import type { ApiConversation, ApiOptions } from "./models";
 
 type Cli = "claude-code" | "pi";
+// The CLI's last error line, without email addresses or token-like strings, for logs and turn errors.
+function reason(stderr: string) {
+  const line = stderr.split("\n").map(l => l.trim()).filter(l => l && !/^Warning: Extension/.test(l)).at(-1);
+  return line ? `: ${line.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "<email>").replace(/[A-Za-z0-9_\-]{32,}/g, "<redacted>").slice(0, 200)}` : "";
+}
 /** bb/claude-code[/<model>] or bb/pi[/<provider>/<model>]: the CLI and its model (null: the CLI's default). */
 export function cliRef(value: string): { cli: Cli; model: string | null } {
   const match = /^bb\/(claude-code|pi)(?:\/(.+))?$/.exec(value);
@@ -35,12 +40,13 @@ export function cliConversation(blocks: { text: string }[], options: ApiOptions)
       const abort = () => { child.kill("SIGTERM"); reject(new Error("Summary cancelled")); };
       options.signal.addEventListener("abort", abort, { once: true });
       child.stdout.on("data", chunk => { out += chunk; });
-      child.stderr.on("data", () => {}); // may hold account details; never logged
+      let err = "";
+      child.stderr.on("data", chunk => { err = (err + chunk).slice(-4000); });
       child.on("error", () => reject(new Error(`Could not launch ${executable} on this machine`)));
       child.on("close", code => {
         children.delete(child); options.signal.removeEventListener("abort", abort);
         if (code === 0 && out.trim()) resolve(out.trim());
-        else reject(new Error(`${options.model} summary failed (exit ${code}); check that ${executable} is signed in on the compactor machine and within its usage limits`));
+        else reject(new Error(`${options.model} summary failed (exit ${code})${reason(err)}; check that ${executable} is signed in on the compactor machine and within its usage limits`));
       });
       child.stdin.end(prompt);
     });
