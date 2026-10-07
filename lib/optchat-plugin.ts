@@ -10,6 +10,7 @@ import { codexRef } from "../runtime/codex";
 import { cliRef } from "../runtime/cli-summarizer";
 // The summarizer is a tool-less text call through a host login: Codex, Claude Code or Pi.
 export const SUMMARIZER_PATIENCE_MS = 60_000;
+const SUMMARY_CALL_TIMEOUT_MS = 300_000;
 const summarizerRef = (model: string) => /^bb\/(claude-code|pi)(\/|$)/.test(model) ? cliRef(model) : codexRef(model);
 import type { createBbWorkers } from "./bb-workers";
 
@@ -36,7 +37,8 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   const worker=await acquireCompactor(root,{chat,report:message=>bb.log.warn(message),async compact(task,options){
     if (!options.model.startsWith("bb/")) return compactNode(task, options);
     summarizerRef(options.model);
-    return modelHost.call("compact",{task,model:options.model},{hostId:await nativeHostId(),signal:options.signal});
+    // One summary can take several model attempts; BB's default 30 s host-call deadline cut them off.
+    return modelHost.call("compact",{task,model:options.model},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
   },async options(signal){
     const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base}=await settings.get();
     const model=typeof selected==="string"&&selected?selected:"bb/codex";
@@ -121,7 +123,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   async function checkModel() {
     const {compactorModel}=await settings.get(), model=compactorModel || "bb/codex";
     summarizerRef(model); const hostId=await nativeHostId();
-    const summary=await modelHost.call("compact",{model,task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)])});
+    const summary=await modelHost.call("compact",{model,task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)]),timeoutMs:120_000});
     return {model,hostId,summary};
   }
   return {...chat,wake:pump,checkModel};
