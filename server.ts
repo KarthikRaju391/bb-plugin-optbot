@@ -223,6 +223,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const contextOwner = (ctx: PluginAgentConfigurationContext) => owner(ctx.thread);
   const optchat=await registerOptChat(bb, resolveOwner, workers);
+  workers.setLiveTurnProbe(threadId => optchat.liveTurn(threadId));
   bb.agents.configure((ctx) => {
     const worker = workers.configuration(ctx);
     // The worker prompt carries the full instructions; BB truncates configured ones.

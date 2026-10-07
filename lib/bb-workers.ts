@@ -180,7 +180,10 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   const rows=db.prepare("SELECT * FROM optbot_workers WHERE parent=? AND status!='stopped'").all(parent) as Row[];
   await Promise.all(rows.map(row=>cancelKey(row.key,row.parent,row.bot)));
  }
- for(const event of ["thread.idle","thread.failed","thread.archived","thread.deleted"] as const)bb.events.on(event,async({thread})=>{await cancelParent(thread.id);});
+ // BB marks a thread failed when one command fails (a rejected message), even while its turn runs on.
+ // Only cancel workers for a failed thread when no live turn still owns them.
+ let liveTurn:(threadId:string)=>boolean=()=>false;
+ for(const event of ["thread.idle","thread.failed","thread.archived","thread.deleted"] as const)bb.events.on(event,async({thread})=>{if(event==="thread.failed"&&liveTurn(thread.id))return;await cancelParent(thread.id);});
  const oldRows=db.prepare("SELECT * FROM optbot_workers WHERE status!='stopped'").all() as Row[];
  const recovery=Promise.all(oldRows.map(async row=>{
   try {
@@ -188,5 +191,5 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   } catch {bb.log.warn("OptBot worker recovery remains pending; inspect the hidden worker timeline.");}
  }));
  bb.onDispose(async()=>{closed=true;await recovery;await Promise.allSettled([...locks.values()]);const rows=db.prepare("SELECT worker FROM optbot_workers WHERE worker IS NOT NULL AND status!='stopped'").all() as {worker:string}[];await Promise.all(rows.map(row=>stop(row.worker)));});
- return {configuration,owner:(threadId:string)=>{const row=find(threadId);return row?.status==="stopped"?null:row?.bot??null;},execute,start,poll,stop,cancelKey,key:randomUUID};
+ return {setLiveTurnProbe(probe:(threadId:string)=>boolean){liveTurn=probe;},configuration,owner:(threadId:string)=>{const row=find(threadId);return row?.status==="stopped"?null:row?.bot??null;},execute,start,poll,stop,cancelKey,key:randomUUID};
 }

@@ -368,6 +368,8 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     search(bot: string, query: string, after = -1) {
       return db.prepare("SELECT idx,kind,date,thread_id AS threadId,substr(text,1,2000) AS text FROM optchat_log WHERE bot_id=? AND idx>? AND instr(lower(text),lower(?))>0 ORDER BY idx LIMIT 50").all(bot, after, query) as Entry[];
     },
+    /** Whether a turn in this conversation still holds an unexpired lease (its bridge heartbeats every 10 s). */
+    liveTurn(threadId: string) { return db.prepare("SELECT 1 FROM optchat_runs WHERE thread_id=? AND status='active' AND expires>?").get(threadId, now()) !== undefined; },
     stats(bot: string) { return { entries: count(bot), nodes: (db.prepare("SELECT COUNT(*) AS n FROM optchat_nodes WHERE bot_id=?").get(bot) as { n: number }).n, parts: parts(bot) }; },
   };
 }

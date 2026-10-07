@@ -9,7 +9,7 @@ import {
   experimental_defineProviderBridge, createBridgeIo, bridgeRequestEnvelopeSchema,
   initializeParamsSchema, modelListParamsSchema, threadStartParamsSchema, threadResumeParamsSchema,
   turnStartParamsSchema, turnSteerParamsSchema, threadStopParamsSchema, threadDeltaSchema,
-  decodeToolCallResponsePayload, sanitizeInheritedChildProcessEnv,
+  decodeToolCallResponsePayload, sanitizeInheritedChildProcessEnv, BRIDGE_JSON_RPC_ERRORS,
   type ThreadDelta,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { apiModel } from "./runtime/models";
@@ -27,6 +27,14 @@ function memoryInput<T extends { type: string; text?: string; visibility?: strin
 // begin and finish are excluded: repeating them after a lost success would misreport the turn.
 const RETRYABLE_MEMORY = new Set(["heartbeat", "record", "input", "checkpoint", "view", "settled", "work", "merge", "zoom", "date", "enqueue"]);
 class ToolTimeout extends Error {}
+class NoActiveTurn extends Error {}
+type InputBlock = { type: string; text?: string; path?: string; name?: string; visibility?: string };
+// The user's input as text: attachments become a note the worker can act on with its file tools.
+function describeInput(blocks: readonly InputBlock[]) {
+  return memoryInput([...blocks]).map(block => block.type === "text" ? block.text ?? ""
+    : block.type === "localFile" || block.type === "localImage" ? `Attached ${block.type === "localImage" ? "image" : "file"} on this execution machine: ${JSON.stringify({ path: block.path, ...(block.type === "localFile" ? { name: block.name } : {}) })}. Inspect it with your file tools if the current request requires it.`
+    : `[An attachment of type ${block.type} was sent; OptBot can only pass text and local files to the worker.]`).join("\n\n");
+}
 
 export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void; toolTimeoutMs?: number; catalog?: () => Promise<Catalog> } = {}) {
   const catalog = deps.catalog ?? cachedCatalog();
@@ -118,7 +126,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         }) : model,
         requestId: params.clientRequestId,
         background: !deps.model,
-        input: memoryInput(params.input).map((block) => block.type === "text" ? block.text : block.type === "localFile" || block.type === "localImage" ? `Attached ${block.type === "localImage" ? "image" : "file"} on this execution machine: ${JSON.stringify({ path: block.path, ...(block.type === "localFile" ? { name: block.name } : {}) })}. Inspect it with your file tools if the current request requires it.` : "").join("\n\n"),
+        input: describeInput(params.input),
         options, onEvent,
       });
       if (!state.released) delta(params.threadId, [{ kind: "turn.boundary", providerTurnId, status: "completed" }]);
@@ -167,10 +175,10 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         void run(params, state);
       } else if(req.method==="turn/steer") {
         const params=turnSteerParamsSchema.parse(req.params),state=active.get(params.threadId),session=sessions.get(params.threadId);
-        if(!state||!session||session.providerThreadId!==params.providerThreadId||state.providerTurnId!==params.expectedTurnId||state.controller.signal.aborted)throw new Error("The expected OptBot turn is no longer active; queue this input for the next turn");
-        if(params.options.permissionMode!==state.permissionMode||params.options.promptMode!==state.promptMode||(params.options.model!==undefined&&params.options.model!==state.model))throw new Error("Model and permission changes take effect on a fresh turn, not during steering");
-        if(params.input.some(block=>block.type!=="text"))throw new Error("Mid-turn steering currently requires text input");
-        const text=memoryInput(params.input).map(block=>block.type==="text"?block.text:"").join("\n\n"),prior=state.received.get(params.clientRequestId);
+        // A finished turn answers NO_ACTIVE_TURN so BB starts a new turn with the message instead of failing the thread.
+        if(!state||!session||session.providerThreadId!==params.providerThreadId||state.providerTurnId!==params.expectedTurnId||state.controller.signal.aborted)throw new NoActiveTurn("The OptBot turn already ended; this message starts the next turn");
+        // A different model or permission in the composer applies from the next turn; the message itself is delivered now.
+        const text=describeInput(params.input),prior=state.received.get(params.clientRequestId);
         if(prior!==undefined&&prior!==text)throw new Error("A client request ID cannot be reused with different input");
         if(prior===undefined){await memory(params.threadId,{action:"enqueue",requestId:params.clientRequestId,parentId:state.requestId,text},state.providerTurnId);state.received.set(params.clientRequestId,text);if(active.get(params.threadId)===state&&!state.controller.signal.aborted)state.incoming.push({id:params.clientRequestId,text});}
         io.sendResult(req.id,{});
@@ -187,7 +195,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         }
         io.sendResult(req.id, {});
       } else io.sendError(req.id, -32601, `Unsupported method: ${req.method}`);
-    } catch (error) { io.sendError(req.id, error instanceof z.ZodError ? -32602 : -32000, error instanceof Error ? error.message : String(error)); }
+    } catch (error) { io.sendError(req.id, error instanceof z.ZodError ? -32602 : error instanceof NoActiveTurn ? BRIDGE_JSON_RPC_ERRORS.NO_ACTIVE_TURN : -32000, error instanceof Error ? error.message : String(error)); }
   }
   function close() {
     for (const state of active.values()) { state.released = true; state.controller.abort(); }
