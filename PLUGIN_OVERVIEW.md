@@ -20,7 +20,7 @@ Operators can inspect, back up and restore a bot's history with `bb optbot memor
 
 - BB 0.44 or newer with Plugin SDK 0.5.29 or newer.
 - At least one installed BB agent provider for conversations (Codex, Claude Code, Pi or an ACP agent). Its normal usage costs apply.
-- Summaries are written through an existing Codex or Claude Code login on one BB machine, set in OptBot's settings. No API key is needed.
+- Summaries are written through an existing Codex, Claude Code or Pi login on one BB machine, set in OptBot's settings. No API key is needed.
 - Turns always run with Full access on the chosen provider.
 - Hiding OptBot from the global picker uses an experimental BB setting that a future BB release may change.
 

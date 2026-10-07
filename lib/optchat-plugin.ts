@@ -7,10 +7,10 @@ import { acquireCompactor, compactNode } from "./compactor";
 import { modelRef } from "../runtime/models";
 import { modelHostContract } from "../runtime/host-contract";
 import { codexRef } from "../runtime/codex";
-import { claudeRef } from "../runtime/claude-summarizer";
-// The summarizer is a tool-less text call through a host login: Codex or Claude Code.
+import { cliRef } from "../runtime/cli-summarizer";
+// The summarizer is a tool-less text call through a host login: Codex, Claude Code or Pi.
 export const SUMMARIZER_PATIENCE_MS = 60_000;
-const summarizerRef = (model: string) => model.startsWith("bb/claude-code") ? claudeRef(model) : codexRef(model);
+const summarizerRef = (model: string) => /^bb\/(claude-code|pi)(\/|$)/.test(model) ? cliRef(model) : codexRef(model);
 import type { createBbWorkers } from "./bb-workers";
 
 export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>) {
@@ -19,8 +19,8 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   const archive = await openArchive(root, message=>bb.log.warn(message));
   const chat = createOptChat(db, { archive });
   const settings=bb.settings.define({
-    compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex[/<model>] or bb/claude-code[/<model>]: a tool-less text call through that provider's existing login on the compactor machine (no API key). Prefer a small model, e.g. bb/codex/gpt-6-luna or bb/claude-code/claude-haiku-4-5-20251001."},
-    compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine signed in to the compactor model's provider (Codex or Claude Code). No separate API key is required."},
+    compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex[/<model>], bb/claude-code[/<model>] or bb/pi[/<provider>/<model>]: a tool-less text call through that CLI's own login on the compactor machine (no API key). Prefer a small model, e.g. bb/codex/gpt-6-luna, bb/claude-code/claude-haiku-4-5-20251001 or bb/pi/openai-codex/gpt-6-luna."},
+    compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine where the compactor model's CLI (codex, claude or pi) is signed in. No separate API key is required."},
     compactorApiKey:{type:"string",label:"Compactor API key",secret:true,description:"Used only by the always-on backend; never sent to the agent or stored in its history."},
     compactorEndpoint:{type:"string",label:"Optional compactor API base URL",description:"Leave empty for the provider's standard endpoint. HTTPS is required except on loopback."},
   });

@@ -5,7 +5,7 @@ import { cacheBlocks, utf8Prefix } from "../runtime/cache";
 import { COMPACT } from "../runtime/prompts";
 import { SCALE } from "../runtime/scale";
 import { codexConversation } from "../runtime/codex";
-import { claudeConversation } from "../runtime/claude-summarizer";
+import { cliConversation } from "../runtime/cli-summarizer";
 export const JOBS=8, TRIES=5, RETRY_MS=10_000;
 export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void; compact?:(task:Compression,options:ApiOptions)=>Promise<string>};
 
@@ -13,7 +13,7 @@ export async function compactNode(task:Compression,options:ApiOptions,native?: (
   const source=task.children?.map(line=>line.replace(/\r\n|\n|\r/g," ")).join("\n")??task.source;
   const step=`For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${task.count===1?"Compress this message into one line, in at most 512 bytes:":"Merge these two lines into one, in at most 512 bytes:"}\n${source}`;
   const blocks=[...cacheBlocks(task.context),{text:step,cache:false}];
-  const conversation=native?native(blocks.map(block=>block.text).join("\n\n"),{...options,system:COMPACT,tools:[]}):options.model.startsWith("bb/claude-code")?claudeConversation(blocks,{...options,system:COMPACT,tools:[]}):options.model.startsWith("bb/")?codexConversation(blocks,{...options,system:COMPACT,tools:[]}):apiConversation(blocks,{...options,system:COMPACT,tools:[]});
+  const conversation=native?native(blocks.map(block=>block.text).join("\n\n"),{...options,system:COMPACT,tools:[]}):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(blocks,{...options,system:COMPACT,tools:[]}):options.model.startsWith("bb/")?codexConversation(blocks,{...options,system:COMPACT,tools:[]}):apiConversation(blocks,{...options,system:COMPACT,tools:[]});
   try {
   const candidates:string[]=[];let feedback:string|undefined;
   for(let n=0;n<TRIES;n++) {
