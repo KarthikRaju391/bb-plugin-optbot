@@ -22,7 +22,7 @@ an installed Bots Sidebar's bots or data; both can be installed side by side.
 ## Install
 
 ```sh
-bb plugin install https://github.com/<owner>/bb-plugin-optbot.git
+bb plugin install https://github.com/KarthikRaju391/bb-plugin-optbot.git
 ```
 
 Then choose **OptBot** in **Settings → Sidebar**.

@@ -2,6 +2,12 @@
   "name": "bb-plugin-optbot",
   "version": "0.1.0",
   "description": "OptBot extends Bots Sidebar: each bot remembers its whole conversation history as an OptChat summary tree and starts every turn fresh.",
+  "author": "Karthik Raju (https://github.com/KarthikRaju391)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KarthikRaju391/bb-plugin-optbot.git"
+  },
+  "homepage": "https://github.com/KarthikRaju391/bb-plugin-optbot#readme",
   "type": "module",
   "private": true,
   "scripts": {
