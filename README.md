@@ -45,6 +45,14 @@ bb optbot model check                                          # runs one test s
 an `openai/<model>` or `anthropic/<model>` ID and `compactorApiKey` (stored as a
 secret).
 
+OptBot finds the CLI on the BB daemon's `PATH`. If that finds a wrapper script
+(for example a version manager's shim) that hangs, each summary call stops after
+90 seconds and the error says so; point OptBot at the real binary:
+
+```sh
+bb plugin config optbot set compactorExecutable /absolute/path/to/pi
+```
+
 ## Use it
 
 - **Create a bot:** the **+** in the OptBot sidebar header offers Bot, Section and

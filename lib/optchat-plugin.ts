@@ -22,6 +22,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   const settings=bb.settings.define({
     compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex[/<model>], bb/claude-code[/<model>] or bb/pi[/<provider>/<model>]: a tool-less text call through that CLI's own login on the compactor machine (no API key). Prefer a small model, e.g. bb/codex/gpt-6-luna, bb/claude-code/claude-haiku-4-5-20251001 or bb/pi/openai-codex/gpt-6-luna."},
     compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine where the compactor model's CLI (codex, claude or pi) is signed in. No separate API key is required."},
+    compactorExecutable:{type:"string",label:"Optional summarizer CLI path",description:"Absolute path to the codex, claude or pi binary on the compactor machine. Leave empty to find it on PATH; set it when PATH finds a wrapper script (for example a version manager's) that hangs."},
     compactorApiKey:{type:"string",label:"Compactor API key",secret:true,description:"Used only by the always-on backend; never sent to the agent or stored in its history."},
     compactorEndpoint:{type:"string",label:"Optional compactor API base URL",description:"Leave empty for the provider's standard endpoint. HTTPS is required except on loopback."},
   });
@@ -34,11 +35,17 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     return compactorHost;
   }
   const modelHost=bb.hosts.experimental_client({contract:modelHostContract});
+  async function executable() {
+    const {compactorExecutable:path}=await settings.get();
+    if (typeof path!=="string" || !path.trim()) return {};
+    if (!path.trim().startsWith("/")) throw new Error("OptBot's compactorExecutable setting must be an absolute path");
+    return {executable:path.trim()};
+  }
   const worker=await acquireCompactor(root,{chat,report:message=>bb.log.warn(message),async compact(task,options){
     if (!options.model.startsWith("bb/")) return compactNode(task, options);
     summarizerRef(options.model);
     // One summary can take several model attempts; BB's default 30 s host-call deadline cut them off.
-    return modelHost.call("compact",{task,model:options.model},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
+    return modelHost.call("compact",{task,model:options.model,...await executable()},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
   },async options(signal){
     const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base}=await settings.get();
     const model=typeof selected==="string"&&selected?selected:"bb/codex";
@@ -123,7 +130,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   async function checkModel() {
     const {compactorModel}=await settings.get(), model=compactorModel || "bb/codex";
     summarizerRef(model); const hostId=await nativeHostId();
-    const summary=await modelHost.call("compact",{model,task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)]),timeoutMs:120_000});
+    const summary=await modelHost.call("compact",{model,...await executable(),task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)]),timeoutMs:120_000});
     return {model,hostId,summary};
   }
   return {...chat,wake:pump,checkModel};

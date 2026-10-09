@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { modelHostContract } from "./runtime/host-contract";
-import { compactNode } from "./lib/compactor";
+import { compactOnHost } from "./runtime/host-compact";
 import {lstat,readFile} from "node:fs/promises";
 import {join} from "node:path";
 import { z } from "zod";
@@ -220,8 +220,8 @@ export const experimental_providerBridge = createOptBotBridge();
 export default experimental_defineHostEntry({
   contract: modelHostContract,
   handlers: {
-    async compact({ task, model }, context) {
-      return compactNode(task, { model, system: "", env: sanitizeInheritedChildProcessEnv({ env: process.env }), signal: AbortSignal.any([context.signal, context.lifecycle.signal]) });
+    async compact(input, context) {
+      return compactOnHost(input, AbortSignal.any([context.signal, context.lifecycle.signal]));
     },
   },
 });
