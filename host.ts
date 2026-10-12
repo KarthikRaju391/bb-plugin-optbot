@@ -27,6 +27,10 @@ function memoryInput<T extends { type: string; text?: string; visibility?: strin
 // begin and finish are excluded: repeating them after a lost success would misreport the turn.
 const RETRYABLE_MEMORY = new Set(["heartbeat", "record", "input", "checkpoint", "view", "settled", "work", "merge", "zoom", "date", "enqueue"]);
 class ToolTimeout extends Error {}
+// A steer is answered once the running turn takes it, or with NO_ACTIVE_TURN if the turn ends first, so BB starts
+// the next turn with it instead of showing it as pending forever. BB waits 30 s for the answer.
+const STEER_ANSWER_MS = 20_000;
+type Incoming = { id: string; text: string };
 class NoActiveTurn extends Error {}
 type InputBlock = { type: string; text?: string; path?: string; name?: string; visibility?: string };
 // The user's input as text: attachments become a note the worker can act on with its file tools.
@@ -40,7 +44,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
   const catalog = deps.catalog ?? cachedCatalog();
   const io = createBridgeIo<unknown>({ write: deps.write });
   const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string }>();
-  type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:{id:string;text:string}[];received:Map<string,string>};
+  type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:Incoming[];waiting:Map<string,(taken:boolean)=>void>;closed?:boolean;received:Map<string,string>};
   const active = new Map<string, State>();
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   const model = deps.model ?? apiModel;
@@ -82,6 +86,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       const key = { providerItemId: `${providerTurnId}:${event.id}` };
       if (event.kind === "user") {
         delta(params.threadId, [{kind:"input.accepted",clientRequestId:event.id,providerTurnId}]);
+        state.waiting.get(event.id)?.(true);
       } else if (event.kind === "thought") {
         const item = { type: "reasoning" as const, content: [event.text], summary: [] };
         delta(params.threadId, [{kind:"item.open",key,item,providerTurnId},{kind:"item.close",key,item,status:"completed",providerTurnId}]);
@@ -132,7 +137,13 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       if (!state.released) delta(params.threadId, [{ kind: "turn.boundary", providerTurnId, status: "completed" }]);
     } catch (error) {
       if (!state.released) delta(params.threadId, [{ kind: "turn.boundary", providerTurnId, status: state.controller.signal.aborted ? "interrupted" : "failed", error: { message: error instanceof Error ? error.message : String(error) } }]);
-    } finally { if (active.get(params.threadId) === state) active.delete(params.threadId); }
+    } finally {
+      // Messages that arrived after the turn's last check were not seen by this turn: BB starts the next one with them.
+      state.closed=true;
+      state.incoming.length=0;
+      for(const answer of state.waiting.values())answer(false);
+      if (active.get(params.threadId) === state) active.delete(params.threadId);
+    }
   }
   async function request(raw: unknown) {
     const parsed = bridgeRequestEnvelopeSchema.safeParse(raw);
@@ -169,18 +180,30 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         const session = sessions.get(params.threadId);
         if (!session || session.providerThreadId !== params.providerThreadId) throw new Error("Start or resume this OptBot conversation first");
         if (active.has(params.threadId)) throw new Error("Conversation already has an active turn");
-        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"bb/codex",permissionMode:params.options.permissionMode,promptMode:params.options.promptMode,incoming:[],received:new Map([[params.clientRequestId,memoryInput(params.input).map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
+        const state:State = { controller: new AbortController(), released: false,requestId:params.clientRequestId,model:params.options.model??"bb/codex",permissionMode:params.options.permissionMode,promptMode:params.options.promptMode,incoming:[],waiting:new Map(),received:new Map([[params.clientRequestId,memoryInput(params.input).map(block=>block.type==="text"?block.text:"").join("\n\n")]]) };
         active.set(params.threadId, state);
         io.sendResult(req.id, {});
         void run(params, state);
       } else if(req.method==="turn/steer") {
         const params=turnSteerParamsSchema.parse(req.params),state=active.get(params.threadId),session=sessions.get(params.threadId);
         // A finished turn answers NO_ACTIVE_TURN so BB starts a new turn with the message instead of failing the thread.
-        if(!state||!session||session.providerThreadId!==params.providerThreadId||state.providerTurnId!==params.expectedTurnId||state.controller.signal.aborted)throw new NoActiveTurn("The OptBot turn already ended; this message starts the next turn");
+        const received=Date.now(),ended=()=>!state||active.get(params.threadId)!==state||state.closed||state.controller.signal.aborted;
+        if(ended()||!session||session.providerThreadId!==params.providerThreadId||state!.providerTurnId!==params.expectedTurnId)throw new NoActiveTurn("The OptBot turn already ended; this message starts the next turn");
+        const turn=state!;
         // A different model or permission in the composer applies from the next turn; the message itself is delivered now.
-        const text=describeInput(params.input),prior=state.received.get(params.clientRequestId);
+        const text=describeInput(params.input),prior=turn.received.get(params.clientRequestId);
         if(prior!==undefined&&prior!==text)throw new Error("A client request ID cannot be reused with different input");
-        if(prior===undefined){await memory(params.threadId,{action:"enqueue",requestId:params.clientRequestId,parentId:state.requestId,text},state.providerTurnId);state.received.set(params.clientRequestId,text);if(active.get(params.threadId)===state&&!state.controller.signal.aborted)state.incoming.push({id:params.clientRequestId,text});}
+        if(prior===undefined){
+          await memory(params.threadId,{action:"enqueue",requestId:params.clientRequestId,parentId:turn.requestId,text},params.expectedTurnId);
+          turn.received.set(params.clientRequestId,text);
+          if(ended())throw new NoActiveTurn("The OptBot turn ended while this message arrived; it starts the next turn");
+          const taken=await new Promise<boolean>(resolve=>{
+            const timer=setTimeout(()=>{turn.waiting.delete(params.clientRequestId);resolve(true);},Math.max(0,STEER_ANSWER_MS-(Date.now()-received)));
+            turn.waiting.set(params.clientRequestId,value=>{clearTimeout(timer);turn.waiting.delete(params.clientRequestId);resolve(value);});
+            turn.incoming.push({id:params.clientRequestId,text});
+          });
+          if(!taken)throw new NoActiveTurn("The OptBot turn ended before it read this message; it starts the next turn");
+        }
         io.sendResult(req.id,{});
       } else if (req.method === "thread/stop") {
         const params = threadStopParamsSchema.parse(req.params);
