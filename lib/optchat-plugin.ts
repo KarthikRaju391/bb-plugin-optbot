@@ -37,17 +37,22 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     return compactorHost;
   }
   const modelHost=bb.hosts.experimental_client({contract:modelHostContract});
-  async function executable() {
-    const {compactorExecutable:path}=await settings.get();
-    if (typeof path!=="string" || !path.trim()) return {};
-    if (!path.trim().startsWith("/")) throw new Error("OptBot's compactorExecutable setting must be an absolute path");
-    return {executable:path.trim()};
+  async function executable(model:string) {
+    const {compactorExecutable:path,compactorAccountPooler:pooled,compactorHost:host}=await settings.get();
+    const extra:{executable?:string;poolToken?:string}={};
+    if (typeof path==="string" && path.trim()) {
+      if (!path.trim().startsWith("/")) throw new Error("OptBot's compactorExecutable setting must be an absolute path");
+      extra.executable=path.trim();
+    }
+    // With Account Pooler on, the Claude Code summarizer runs against the pool like BB's own Claude Code threads.
+    if (pooled===true && /^bb\/claude-code(\/|$)/.test(model)) extra.poolToken=(await poolCredentials(bb.server.experimental_dataDir,bb.server.loopbackBaseUrl,typeof host==="string"&&host?host:undefined)).OPTBOT_POOL_TOKEN;
+    return extra;
   }
   const worker=await acquireCompactor(root,{chat,report:message=>bb.log.warn(message),async compact(task,options){
     if (!options.model.startsWith("bb/")) return compactNode(task, options);
     summarizerRef(options.model);
     // One summary can take several model attempts; BB's default 30 s host-call deadline cut them off.
-    return modelHost.call("compact",{task,model:options.model,...await executable()},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
+    return modelHost.call("compact",{task,model:options.model,...await executable(options.model)},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
   },async options(signal){
     const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base}=await settings.get();
     const model=typeof selected==="string"&&selected?selected:"bb/codex";
@@ -144,8 +149,9 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
       return {model,via:"Account Pooler",summary};
     }
     summarizerRef(model); const hostId=await nativeHostId();
-    const summary=await modelHost.call("compact",{model,...await executable(),task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)]),timeoutMs:120_000});
-    return {model,hostId,summary};
+    const summary=await modelHost.call("compact",{model,...await executable(model),task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)]),timeoutMs:120_000});
+    const {compactorAccountPooler:pooled}=await settings.get();
+    return {model,hostId,...(pooled===true&&/^bb\/claude-code(\/|$)/.test(model)?{via:"Account Pooler"}:{}),summary};
   }
   return {...chat,wake:pump,checkModel};
 }

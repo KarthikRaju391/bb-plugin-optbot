@@ -53,9 +53,15 @@ stopping on one CLI login:
 
 ```sh
 bb plugin config optbot set compactorAccountPooler true
-bb plugin config optbot set compactorModel pool/claude/claude-haiku-4-5  # or pool/codex/<model>
+bb plugin config optbot set compactorModel bb/claude-code/claude-haiku-5-5
 bb optbot model check
 ```
+
+With `bb/claude-code/<model>`, the summary runs in the Claude Code CLI on the
+compactor machine, pointed at Account Pooler the way BB points its Claude Code
+threads; newer models such as Claude Haiku 5.5 are served only to Claude Code.
+`pool/claude/<model>` (for example `pool/claude/claude-haiku-4-5`) and
+`pool/codex/<model>` instead call Account Pooler directly from OptBot.
 
 Account Pooler does not offer this to plugins. With the setting on, OptBot reads
 Account Pooler's machine token from BB's data folder for each summary and sends
