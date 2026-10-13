@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { modelHostContract } from "./runtime/host-contract";
 import { compactOnHost } from "./runtime/host-compact";
+import { TRANSIENT_NETWORK } from "./runtime/transient";
 import {lstat,readFile} from "node:fs/promises";
 import {join} from "node:path";
 import { z } from "zod";
@@ -30,6 +31,8 @@ class ToolTimeout extends Error {}
 // A steer is answered once the running turn takes it, or with NO_ACTIVE_TURN if the turn ends first, so BB starts
 // the next turn with it instead of showing it as pending forever. BB waits 30 s for the answer.
 const STEER_ANSWER_MS = 20_000;
+// How long a repeatable call waits out network errors from a frozen BB server before the turn fails.
+export const TRANSIENT_PATIENCE_MS = 120_000;
 type Incoming = { id: string; text: string };
 class NoActiveTurn extends Error {}
 type InputBlock = { type: string; text?: string; path?: string; name?: string; visibility?: string };
@@ -62,11 +65,19 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       io.send({ jsonrpc: "2.0", id, method: "item/tool/call", params: { threadId, providerThreadId: session.providerThreadId, turnId: providerTurnId, callId: id, tool, arguments: input } });
     });
   }
-  // A slow or lost reply should not fail the whole turn when the request is safe to repeat.
+  // A slow or lost reply should not fail the whole turn when the request is safe to repeat. A network error
+  // inside the tool (BB's server froze and the plugin's call to its own API failed) is waited out the same way;
+  // the worker thread keeps running meanwhile.
   async function callRetrying(threadId: string, tool: string, input: Record<string, unknown>, turn: string, retryable: boolean) {
+    const started = Date.now();
     for (let attempt = 1; ; attempt++) {
-      try { return await call(threadId, tool, input, turn); }
-      catch (error) { if (!(error instanceof ToolTimeout) || !retryable || attempt === 3) throw error; }
+      let response: unknown;
+      try { response = await call(threadId, tool, input, turn); }
+      catch (error) { if (!(error instanceof ToolTimeout) || !retryable || attempt === 3) throw error; continue; }
+      if (!retryable || Date.now() - started >= TRANSIENT_PATIENCE_MS) return response;
+      const result = decodeToolCallResponsePayload(response as Parameters<typeof decodeToolCallResponsePayload>[0]);
+      if (!result.isError || !TRANSIENT_NETWORK.test(result.content)) return response;
+      await new Promise(resolve => setTimeout(resolve, Math.min(2_000 * attempt, 15_000)));
     }
   }
   async function memory(threadId: string, input: Record<string, unknown>, turn: string) {

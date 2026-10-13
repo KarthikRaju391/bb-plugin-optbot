@@ -1,3 +1,4 @@
+import { TRANSIENT_NETWORK } from "../runtime/transient";
 import {createHash,randomUUID} from "node:crypto";
 import {z} from "zod";
 import type {BbPluginApi,PluginAgentConfigurationContext} from "@get-bb/plugin-sdk";
@@ -37,7 +38,7 @@ export const workerInput=z.object({action:z.enum(["start","poll","stop","steer"]
 type Row={key:string;parent:string|null;bot:string|null;worker:string|null;fingerprint:string;instructions:string;role:"master"|"summary";status:string;pending_result:string|null};
 // BB's server can freeze for seconds (synchronous SQLite) and drop a connection mid-request.
 // A running worker is unaffected, so read-only checks retry instead of failing the turn.
-const NETWORK=/fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|UND_ERR|other side closed/i;
+const NETWORK=TRANSIENT_NETWORK;
 function transientNetworkError(error:unknown) {
  const cause=(error as {cause?:{code?:string;message?:string}})?.cause;
  return error instanceof Error&&(NETWORK.test(error.message)||NETWORK.test(String(cause?.code??""))||NETWORK.test(String(cause?.message??"")));
