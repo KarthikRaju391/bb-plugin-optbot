@@ -73,7 +73,13 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     for (let attempt = 1; ; attempt++) {
       let response: unknown;
       try { response = await call(threadId, tool, input, turn); }
-      catch (error) { if (!(error instanceof ToolTimeout) || !retryable || attempt === 3) throw error; continue; }
+      catch (error) {
+        // BB itself can fail to deliver the call (the daemon's request to a frozen server): same wait.
+        const network = retryable && error instanceof Error && !(error instanceof ToolTimeout) && TRANSIENT_NETWORK.test(error.message) && Date.now() - started < TRANSIENT_PATIENCE_MS;
+        if (network) { await new Promise(resolve => setTimeout(resolve, Math.min(2_000 * attempt, 15_000))); continue; }
+        if (!(error instanceof ToolTimeout) || !retryable || attempt >= 3) throw error;
+        continue;
+      }
       if (!retryable || Date.now() - started >= TRANSIENT_PATIENCE_MS) return response;
       const result = decodeToolCallResponsePayload(response as Parameters<typeof decodeToolCallResponsePayload>[0]);
       if (!result.isError || !TRANSIENT_NETWORK.test(result.content)) return response;
