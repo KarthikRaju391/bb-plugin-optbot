@@ -8,6 +8,7 @@ import { modelRef } from "../runtime/models";
 import { modelHostContract } from "../runtime/host-contract";
 import { codexRef } from "../runtime/codex";
 import { cliRef } from "../runtime/cli-summarizer";
+import { poolCredentials, poolRef } from "../runtime/pool-summarizer";
 // The summarizer is a tool-less text call through a host login: Codex, Claude Code or Pi.
 export const SUMMARIZER_PATIENCE_MS = 60_000;
 const SUMMARY_CALL_TIMEOUT_MS = 300_000;
@@ -20,9 +21,10 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   const archive = await openArchive(root, message=>bb.log.warn(message));
   const chat = createOptChat(db, { archive });
   const settings=bb.settings.define({
-    compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex[/<model>], bb/claude-code[/<model>] or bb/pi[/<provider>/<model>]: a tool-less text call through that CLI's own login on the compactor machine (no API key). Prefer a small model, e.g. bb/codex/gpt-6-luna, bb/claude-code/claude-haiku-4-5-20251001 or bb/pi/openai-codex/gpt-6-luna."},
+    compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex[/<model>], bb/claude-code[/<model>], bb/pi[/<provider>/<model>] or, with compactorAccountPooler on, pool/claude/<model> or pool/codex/<model>: a tool-less text call through that CLI's own login on the compactor machine (no API key). Prefer a small model, e.g. bb/codex/gpt-6-luna, bb/claude-code/claude-haiku-4-5-20251001 or bb/pi/openai-codex/gpt-6-luna."},
     compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine where the compactor model's CLI (codex, claude or pi) is signed in. No separate API key is required."},
     compactorExecutable:{type:"string",label:"Optional summarizer CLI path",description:"Absolute path to the codex, claude or pi binary on the compactor machine. Leave empty to find it on PATH; set it when PATH finds a wrapper script (for example a version manager's) that hangs."},
+    compactorAccountPooler:{type:"boolean",label:"Summarize through Account Pooler (unsupported by BB)",default:false,description:"Lets OptBot read Account Pooler's machine token from BB's data folder to send summaries through its local proxy, which switches accounts like BB does. Then set compactorModel to pool/claude/<model> (e.g. pool/claude/claude-haiku-4-5) or pool/codex/<model>. Account Pooler does not offer this to plugins officially; it may break in a future BB release."},
     compactorApiKey:{type:"string",label:"Compactor API key",secret:true,description:"Used only by the always-on backend; never sent to the agent or stored in its history."},
     compactorEndpoint:{type:"string",label:"Optional compactor API base URL",description:"Leave empty for the provider's standard endpoint. HTTPS is required except on loopback."},
   });
@@ -50,6 +52,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base}=await settings.get();
     const model=typeof selected==="string"&&selected?selected:"bb/codex";
     if(model.startsWith("bb/")) {summarizerRef(model);return {model,env:{},signal,system:""};}
+    if(model.startsWith("pool/")) return {model,env:await poolEnv(model),signal,system:""};
     const provider=modelRef(model).provider;
     const env={...process.env};
     if(typeof credential==="string"&&credential) env[provider==="openai"?"OPENAI_API_KEY":"ANTHROPIC_API_KEY"]=credential;
@@ -127,8 +130,19 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
       return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1);
     },
   });
+  async function poolEnv(model:string) {
+    poolRef(model);
+    const {compactorAccountPooler:allowed,compactorHost:host}=await settings.get();
+    if(allowed!==true)throw new Error("Turn on OptBot's compactorAccountPooler setting to summarize through Account Pooler");
+    return poolCredentials(bb.server.experimental_dataDir,bb.server.loopbackBaseUrl,typeof host==="string"&&host?host:undefined);
+  }
   async function checkModel() {
     const {compactorModel}=await settings.get(), model=compactorModel || "bb/codex";
+    if(model.startsWith("pool/")) {
+      const signal=AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)]);
+      const summary=await compactNode({start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."},{model,env:await poolEnv(model),signal,system:""});
+      return {model,via:"Account Pooler",summary};
+    }
     summarizerRef(model); const hostId=await nativeHostId();
     const summary=await modelHost.call("compact",{model,...await executable(),task:{start:0,count:1,context:"<chat>\n\n</chat>",source:"user: This is an OptBot readiness check. Preserve OPTBOT_NATIVE_CHECK_OK."}},{hostId,signal:AbortSignal.any([nativeLifetime.signal,AbortSignal.timeout(120_000)]),timeoutMs:120_000});
     return {model,hostId,summary};

@@ -45,6 +45,23 @@ bb optbot model check                                          # runs one test s
 an `openai/<model>` or `anthropic/<model>` ID and `compactorApiKey` (stored as a
 secret).
 
+### Summarize through Account Pooler (optional, unsupported)
+
+Conversations already use Account Pooler when they run on Codex or Claude Code.
+Summaries can use it too, so they switch accounts at a usage limit instead of
+stopping on one CLI login:
+
+```sh
+bb plugin config optbot set compactorAccountPooler true
+bb plugin config optbot set compactorModel pool/claude/claude-haiku-4-5  # or pool/codex/<model>
+bb optbot model check
+```
+
+Account Pooler does not offer this to plugins. With the setting on, OptBot reads
+Account Pooler's machine token from BB's data folder for each summary and sends
+the request to its local proxy; the token is never logged or stored. A future BB
+release may break this, so it stays off unless you turn it on.
+
 OptBot finds the CLI on the BB daemon's `PATH`. If that finds a wrapper script
 (for example a version manager's shim) that hangs, each summary call stops after
 90 seconds and the error says so; point OptBot at the real binary:
