@@ -4,7 +4,7 @@ import type {OptChat} from "./optchat";
 import {z} from "zod";
 import {mkdirSync,readFileSync,writeFileSync,renameSync} from "node:fs";
 import {isAbsolute,join} from "node:path";
-const row=z.object({i:z.number().int().nonnegative().optional(),kind:z.enum(["user","talk","tool","echo","note"]),text:z.string(),date:z.string().datetime({offset:true}).optional(),eventKey:z.string().optional(),threadId:z.string().optional()});
+const row=z.object({i:z.number().int().nonnegative().optional(),kind:z.enum(["user","talk","tool","echo","work","note"]),text:z.string(),date:z.string().datetime({offset:true}).optional(),eventKey:z.string().optional(),threadId:z.string().optional()});
 const tree=z.object({l:z.number().int().min(0).max(52),i:z.number().int().nonnegative(),text:z.string().min(1),size:z.number().int().nonnegative()});
 export const IMPORT_SCHEMA=z.union([z.array(row),z.object({version:z.literal(1),main:z.array(row),tree:z.array(tree).optional()}).passthrough()]);
 const escape=(value:unknown)=>String(value).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");

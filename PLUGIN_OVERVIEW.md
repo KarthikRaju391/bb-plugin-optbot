@@ -1,10 +1,10 @@
-OptBot is an extension of [Bots Sidebar](https://github.com/tobi/bb-bots-sidebar) by Tobias Lütke. It keeps the Bots Sidebar experience (named bots, avatars, sections, project roles, conversation trees, `@` mentions) and replaces how a bot remembers with [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449), Victor Taelin's design for an endless chat whose history is its memory.
+OptBot is an extension of [Bots Sidebar](https://github.com/tobi/bb-bots-sidebar) by Tobias Lütke. It keeps the Bots Sidebar experience (named bots, avatars, sections, project roles, conversation trees, `@` mentions) and replaces how a bot remembers with [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449), Victor Taelin's design (now called UniiChat) for an endless chat whose history is its memory.
 
 ## What you get
 
 - One memory per bot, shared by all of that bot's conversations and isolated from every other bot.
 - Every message, reply and tool call is kept word for word, append-only, in daily JSONL files; tool results keep up to 30,000 characters (start and end).
-- Each turn starts fresh: the bot reads a bounded view (about 128 KB) of its whole history, recent messages one per line and older ones summarized in larger blocks, then your new message. Its context never grows and is never compacted away.
+- Each turn starts fresh: the bot reads a bounded view (64-128 KB) of its whole history, recent messages one per line and older ones summarized in larger blocks, then your new message. Its context never grows and is never compacted away.
 - When a summary is too vague, the bot zooms into it, line by line, down to the original message.
 - Corrections stick: your own words rank first when history is summarized, so the latest decision is what the bot remembers.
 - Switch the model in the conversation's composer at any time; the next turn uses it and keeps the memory.

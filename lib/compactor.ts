@@ -2,8 +2,7 @@ import type { Compression, OptChat } from "./optchat";
 import { NODE_BYTES } from "./optchat";
 import { apiConversation, type ApiOptions, type ApiConversation } from "../runtime/models";
 import { cacheBlocks, utf8Prefix } from "../runtime/cache";
-import { COMPACT } from "../runtime/prompts";
-import { SCALE } from "../runtime/scale";
+import { SYSTEM, compactionTask, tooLong } from "../runtime/prompts";
 import { codexConversation } from "../runtime/codex";
 import { cliConversation } from "../runtime/cli-summarizer";
 import { poolConversation } from "../runtime/pool-summarizer";
@@ -11,10 +10,9 @@ export const JOBS=8, TRIES=5, RETRY_MS=10_000;
 export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void; compact?:(task:Compression,options:ApiOptions)=>Promise<string>};
 
 export async function compactNode(task:Compression,options:ApiOptions,native?: (prompt:string,options:ApiOptions)=>ApiConversation) {
-  const source=task.children?.map(line=>line.replace(/\r\n|\n|\r/g," ")).join("\n")??task.source;
-  const step=`For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${task.count===1?"Compress this message into one line, in at most 512 bytes:":"Merge these two lines into one, in at most 512 bytes:"}\n${source}`;
-  const blocks=[...cacheBlocks(task.context),{text:step,cache:false}];
-  const conversation=native?native(blocks.map(block=>block.text).join("\n\n"),{...options,system:COMPACT,tools:[]}):options.model.startsWith("pool/")?poolConversation(blocks,{...options,system:COMPACT,tools:[]}):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(blocks,{...options,system:COMPACT,tools:[]}):options.model.startsWith("bb/")?codexConversation(blocks,{...options,system:COMPACT,tools:[]}):apiConversation(blocks,{...options,system:COMPACT,tools:[]});
+  // §4: [system prompt] [<chat> compaction view </chat>] [task], the same system prompt as turns.
+  const blocks=[...cacheBlocks(task.context),{text:compactionTask(task),cache:false}];
+  const conversation=native?native(blocks.map(block=>block.text).join("\n\n"),{...options,system:SYSTEM,tools:[]}):options.model.startsWith("pool/")?poolConversation(blocks,{...options,system:SYSTEM,tools:[]}):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(blocks,{...options,system:SYSTEM,tools:[]}):options.model.startsWith("bb/")?codexConversation(blocks,{...options,system:SYSTEM,tools:[]}):apiConversation(blocks,{...options,system:SYSTEM,tools:[]});
   try {
   const candidates:string[]=[];let feedback:string|undefined;
   for(let n=0;n<TRIES;n++) {
@@ -23,7 +21,7 @@ export async function compactNode(task:Compression,options:ApiOptions,native?: (
     if(!line) throw new Error("Compactor returned an empty line");
     candidates.push(line); const size=Buffer.byteLength(line);
     if(size<=NODE_BYTES) break;
-    feedback=`That line is ${size} bytes; the limit is 512. It must end where it is cut here:\n${utf8Prefix(line,NODE_BYTES)}| ← LIMIT`;
+    feedback=tooLong(size,utf8Prefix(line,NODE_BYTES));
   }
   return candidates.reduce((best,line)=>Buffer.byteLength(line)<Buffer.byteLength(best)?line:best);
   } finally { conversation.close?.(); }

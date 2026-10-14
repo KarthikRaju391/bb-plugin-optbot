@@ -1,6 +1,6 @@
 import {randomUUID} from "node:crypto";
 import type {ModelBoundary,ModelEvent,ModelOptions} from "./turn";
-import {MASTER,BB_VIEW_DOC} from "./prompts";
+import {SYSTEM} from "./prompts";
 
 export function bbModelRef(value:string) {
  const match=/^bb\/([a-z0-9-]+)(?:\/(.+))?$/.exec(value);
@@ -17,7 +17,7 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
    bbModelRef(options.model); options.signal.throwIfAborted();
    const key=randomUUID();let workerId:string|undefined,cursor:string|undefined;
    try {
-    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:[MASTER,BB_VIEW_DOC,WORKER_NOTE,options.instructions].filter(Boolean).join("\n\n"),permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
+    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:[SYSTEM,WORKER_NOTE,options.instructions].filter(Boolean).join("\n\n"),permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
     for(;;) {
      options.signal.throwIfAborted();
      const incoming=options.incoming?.()??[];

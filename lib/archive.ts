@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { createConnection, createServer } from "node:net";
-import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import Database from "better-sqlite3";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { z } from "zod";
 
-const mainSchema = z.object({ i: z.number().int().nonnegative(), kind: z.enum(["user", "talk", "tool", "echo", "note"]), text: z.string(), size: z.number().int().nonnegative(), date: z.string().datetime(), eventKey: z.string().optional(), threadId: z.string().optional() });
+const mainSchema = z.object({ i: z.number().int().nonnegative(), kind: z.enum(["user", "talk", "tool", "echo", "work", "note"]), text: z.string(), size: z.number().int().nonnegative(), date: z.string().datetime(), eventKey: z.string().optional(), threadId: z.string().optional() });
+const viewSchema = z.array(z.tuple([z.number().int().nonnegative().max(52), z.number().int().nonnegative()]));
 const treeSchema = z.object({ l: z.number().int().nonnegative().max(52), i: z.number().int().nonnegative(), text: z.string(), size: z.number().int().nonnegative() });
 export type MainLine = z.infer<typeof mainSchema>;
 const receiptSchema=z.object({id:z.string().min(1),parentId:z.string().min(1),threadId:z.string(),text:z.string(),date:z.string().datetime()}).strict();
@@ -125,6 +126,20 @@ async function createArchive(rootPath: string, warn: (message: string) => void =
       if (valid.size !== bytes(valid.text) || (valid.i+1)*2**valid.l > data.main.length) throw new Error("Invalid OptChat node range or size");
       writeLine(join(root,bot,"tree",localDay()+".jsonl"),valid); data.tree.set(key,valid);
     },
+    /** view.json: the view as [l, i] pairs (spec §1). Saved on every change, loaded at start, never rebuilt. */
+    loadView(bot: string): [number, number][] | null {
+      load(bot); const path = join(root, bot, "view.json");
+      if (!existsSync(path)) return null;
+      if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error("Unsafe OptChat view file");
+      try { return viewSchema.parse(JSON.parse(readFileSync(path, "utf8"))); } catch { warn("Skipped an invalid view.json"); return null; }
+    },
+    saveView(bot: string, pairs: [number, number][]) {
+      load(bot); const dir = join(root, bot), path = join(dir, "view.json"), temp = join(dir, ".view.json.tmp");
+      const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+      // Atomic, not synced: data.db holds the durable copy, and a torn or stale file falls back to it.
+      try { const data = Buffer.from(JSON.stringify(pairs)); if (writeSync(fd, data) !== data.length) throw new Error("Incomplete OptChat view write"); } finally { closeSync(fd); }
+      renameSync(temp, path);
+    },
     async close() { if (closed) return; closed=true; await new Promise<void>((resolveClose,reject)=>server.close(error=>error?reject(error):resolveClose())); },
   };
 }
@@ -154,6 +169,8 @@ export async function openArchive(rootPath: string, warn: (message: string) => v
     receive(bot,row){live();return value.receive(bot,row);},
     appendMain(bot,line) { live(); return value.appendMain(bot,line); },
     appendTree(bot,line) { live(); return value.appendTree(bot,line); },
+    loadView(bot) { live(); return value.loadView(bot); },
+    saveView(bot,pairs) { live(); return value.saveView(bot,pairs); },
     async close() {
       if(released) return; released=true;
       if(--shared.refs===0) {

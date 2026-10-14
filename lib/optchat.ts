@@ -1,17 +1,42 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Archive, Receipt, TreeLine, MainLine } from "./archive";
+import { appendCompactionLine, appendLine, tiles, VIEW_HIGH } from "./view";
 
 export const NODE_BYTES = 512;
-export const VIEW_BYTES = 128_000;
+export const VIEW_BYTES = VIEW_HIGH;
 const LEASE_MS = 60_000;
-export type MemoryKind = "user" | "talk" | "tool" | "echo" | "note";
+export type MemoryKind = "user" | "talk" | "tool" | "echo" | "work" | "note";
+/** Tool output is clipped to this many characters; any other longer text is logged over several messages (§1). */
+export const MESSAGE_CHARS = 30_000;
+/**
+ * An incoming message as the log records it (§1): a report from another BB thread or bot is `work`, starting
+ * "[Name]" (the bot's name, else the thread's id); anything else is the user's words.
+ */
+export function inputEntry(text: string): { kind: MemoryKind; text: string } {
+  const message = /^\[bb message from thread:(thr_[A-Za-z0-9]+)\][ \t]*\r?\n+([\s\S]*)$/.exec(text);
+  if (!message) return { kind: "user", text };
+  let name = message[1]!, body = message[2]!;
+  const bot = /^\*\*🤖 Bot message · ([^*\n]+)\*\*[ \t]*\r?\n+([\s\S]*)$/.exec(body);
+  if (bot) { if (bot[1]!.trim() !== "BB agent") name = bot[1]!.trim(); body = bot[2]!; }
+  return { kind: "work", text: `[${name}] ${body}` };
+}
+function chunks(text: string) {
+  const result: string[] = [];
+  for (let at = 0; at < text.length;) {
+    let end = Math.min(at + MESSAGE_CHARS, text.length);
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--; // never split a surrogate pair
+    result.push(text.slice(at, end)); at = end;
+  }
+  return result;
+}
 type Part = { start: number; count: number };
 type Entry = { idx: number; kind: MemoryKind; text: string; date: string; threadId: string };
 type Run = { requestId: string; threadId: string; lease: string; expires: number; status: string; result: string };
 export type Compression = { start: number; count: number; source: string; context: string; children?:string[] };
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 const label = (part: Part) => `${part.start}+${part.count}`;
+const PLACEHOLDER_BYTES = Buffer.byteLength("(not summarized yet: zoom it)");
 
 /** Server-owned store: all hosts share one bot log, with transactional writes. */
 export function createOptChat(db: Database.Database, options: { viewBytes?: number; now?: () => number; archive?: Archive } = {}) {
@@ -36,15 +61,80 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     CREATE UNIQUE INDEX IF NOT EXISTS optchat_one_active ON optchat_runs(bot_id) WHERE status='active';
   `);
   if (!(db.pragma("table_info(optchat_runs)") as { name: string }[]).some(column => column.name === "answer")) db.exec("ALTER TABLE optchat_runs ADD COLUMN answer TEXT");
+  const viewColumns = (db.pragma("table_info(optchat_view)") as { name: string }[]).map(column => column.name);
+  if (!viewColumns.includes("draining")) db.exec("ALTER TABLE optchat_view ADD COLUMN draining INTEGER NOT NULL DEFAULT 0");
+  if (!viewColumns.includes("cparts")) db.exec("ALTER TABLE optchat_view ADD COLUMN cparts TEXT");
+  // The sawtooth: the view grows to `budget` bytes, then one batch merges it down to half (§3.2).
+  const low = Math.floor(budget / 2);
   const count = (bot: string) => (db.prepare("SELECT COUNT(*) AS n FROM optchat_log WHERE bot_id=?").get(bot) as { n: number }).n;
   const entry = (bot: string, idx: number) => db.prepare("SELECT idx,kind,text,date,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND idx=?").get(bot, idx) as Entry | undefined;
   const node = (bot: string, part: Part) => (db.prepare("SELECT text FROM optchat_nodes WHERE bot_id=? AND start=? AND count=?").get(bot, part.start, part.count) as { text: string } | undefined)?.text;
   const parts = (bot: string): Part[] => JSON.parse((db.prepare("SELECT parts FROM optchat_view WHERE bot_id=?").get(bot) as { parts: string } | undefined)?.parts ?? "[]");
-  const saveParts = (bot: string, view: Part[]) => db.prepare("INSERT INTO optchat_view VALUES (?,?) ON CONFLICT(bot_id) DO UPDATE SET parts=excluded.parts").run(bot, JSON.stringify(view));
+  type ViewState = { view: Part[]; draining: boolean; cview: Part[] | null };
+  function viewState(bot: string): ViewState {
+    const row = db.prepare("SELECT parts,draining,cparts FROM optchat_view WHERE bot_id=?").get(bot) as { parts: string; draining: number; cparts: string | null } | undefined;
+    return { view: JSON.parse(row?.parts ?? "[]"), draining: row?.draining === 1, cview: row?.cparts ? JSON.parse(row.cparts) : null };
+  }
+  // Saved on every change, to data.db and to the chat's view.json; loaded at start, never rebuilt (§3.2).
+  function saveState(bot: string, state: ViewState) {
+    db.prepare("INSERT INTO optchat_view(bot_id,parts,draining,cparts) VALUES (?,?,?,?) ON CONFLICT(bot_id) DO UPDATE SET parts=excluded.parts,draining=excluded.draining,cparts=excluded.cparts")
+      .run(bot, JSON.stringify(state.view), state.draining ? 1 : 0, state.cview ? JSON.stringify(state.cview) : null);
+    options.archive?.saveView(bot, state.view.map(part => [Math.log2(part.count), part.start / part.count]));
+  }
+  // Built nodes never change, so their sizes are cached; only unbuilt lines (a few recent ones) hit the DB.
+  const known = new Map<string, Map<string, number>>();
+  function nodeBytes(bot: string, part: Part) {
+    let sizes = known.get(bot); if (!sizes) known.set(bot, sizes = new Map());
+    const key = label(part), cached = sizes.get(key);
+    if (cached !== undefined) return cached;
+    const text = node(bot, part);
+    if (text === undefined) return undefined;
+    sizes.set(key, bytes(text)); return bytes(text);
+  }
+  const built = (bot: string) => (part: Part) => nodeBytes(bot, part) !== undefined;
+  const sized = (bot: string) => (part: Part) => nodeBytes(bot, part) ?? PLACEHOLDER_BYTES;
+  // Within one transaction that adds no summaries, unbuilt lines stay unbuilt: memoize them too.
+  function frozen(bot: string) {
+    const unbuilt = new Set<string>();
+    const has = (part: Part) => { if (unbuilt.has(label(part))) return false; if (nodeBytes(bot, part) !== undefined) return true; unbuilt.add(label(part)); return false; };
+    return { size: (part: Part) => has(part) ? nodeBytes(bot, part)! : PLACEHOLDER_BYTES, isBuilt: has };
+  }
+  /** A new message appends its line to the view and to the compactions' view (§3.2, §4). */
+  function appendToState(bot: string, state: ViewState, index: number, size: (part: Part) => number, isBuilt: (part: Part) => boolean) {
+    const result = appendLine(state.view, index, size, isBuilt, state.draining, budget, low);
+    state.draining = result.draining;
+    state.cview = appendCompactionLine(state.cview, state.view, index, size, isBuilt, result.merged > 0);
+  }
+  // Ready work in queues, never a tree scan (§4): unbuilt leaves in order, and merges whose halves are built.
+  const queues = new Map<string, { leaves: number[]; merges: Map<string, Part> }>();
+  function queue(bot: string) {
+    let q = queues.get(bot);
+    if (q) return q;
+    q = { leaves: [], merges: new Map() }; queues.set(bot, q);
+    const total = count(bot), done = new Set((db.prepare("SELECT start,count FROM optchat_nodes WHERE bot_id=?").all(bot) as Part[]).map(label));
+    for (let i = 0; i < total; i++) if (!done.has(`${i}+1`)) q.leaves.push(i);
+    for (const key of done) {
+      const [start, size] = key.split("+").map(Number) as [number, number], parent = { start: start - start % (2 * size), count: 2 * size };
+      const other = parent.start === start ? start + size : parent.start;
+      if (parent.start + parent.count <= total && !done.has(label(parent)) && done.has(`${other}+${size}`)) q.merges.set(label(parent), parent);
+    }
+    for (const leaf of [...q.leaves]) { const raw = entry(bot, leaf)!, source = `${raw.kind}: ${raw.text}`; if (bytes(source) <= NODE_BYTES) saveNode(bot, leaf, 1, source); }
+    for (const part of [...q.merges.values()]) if (node(bot, part) === undefined) { const a = node(bot, { start: part.start, count: part.count / 2 })!, b = node(bot, { start: part.start + part.count / 2, count: part.count / 2 })!; if (bytes(`${a}\n${b}`) <= NODE_BYTES) saveNode(bot, part.start, part.count, `${a}\n${b}`); }
+    return q;
+  }
   const loaded = new Set<string>();
-  function saveNode(bot: string, start: number, count: number, text: string) {
-    options.archive?.appendTree(bot, { l: Math.log2(count), i: start/count, text, size: bytes(text) });
-    db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,count,text);
+  function saveNode(bot: string, start: number, size: number, text: string) {
+    options.archive?.appendTree(bot, { l: Math.log2(size), i: start/size, text, size: bytes(text) });
+    db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,size,text);
+    const q = queues.get(bot), part = { start, count: size };
+    if (q) { if (size === 1) { const at = q.leaves.indexOf(start); if (at >= 0) q.leaves.splice(at, 1); } q.merges.delete(label(part)); }
+    // Its parent is ready once both halves are built; two lines that fit together are their own node (§2).
+    const parent = { start: start - start % (2 * size), count: 2 * size };
+    if (entry(bot, parent.start + parent.count - 1) === undefined || node(bot, parent) !== undefined) return;
+    const a = node(bot, { start: parent.start, count: size }), b = node(bot, { start: parent.start + size, count: size });
+    if (a === undefined || b === undefined) return;
+    if (bytes(`${a}\n${b}`) <= NODE_BYTES) saveNode(bot, parent.start, parent.count, `${a}\n${b}`);
+    else q?.merges.set(label(parent), parent);
   }
   // One transaction: importing a cold cache row by row would fsync every insert.
   function hydrate(bot: string) { db.transaction(() => hydrateNow(bot))(); }
@@ -75,48 +165,30 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       if (old !== undefined && old !== line.text) throw new Error("SQLite cache disagrees with canonical OptChat tree");
       if (old === undefined) db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,count,line.text);
     }
-    // The view is reconstructed by the reference append+fit fold, never read
-    // from a possibly stale persisted view snapshot.
-    // Fold in memory and save once (spec §5.2: 2,300 messages in ~20 ms).
-    // Numeric keys: the fold looks nodes up millions of times on a long history.
-    const texts=new Map<number,Map<number,string>>();
-    for (const row of db.prepare("SELECT start,count,text FROM optchat_nodes WHERE bot_id=?").all(bot) as (Part&{text:string})[]) { let level=texts.get(row.count); if(!level)texts.set(row.count,level=new Map()); level.set(row.start,row.text); }
-    const view:Part[]=[];
-    const lookup=(part:Part)=>texts.get(part.count)?.get(part.start);let used=0;
-    for (let i=0;i<data.main.length;i++) { const leaf={start:i,count:1}; view.push(leaf); used=fold(view,i+1,lookup,used+partBytes(leaf,lookup)); }
-    saveParts(bot,view);
+    // Keep the saved view (view.json, else data.db) and append only lines for messages it lacks. It is rebuilt
+    // from the log only when there is none, e.g. a restored backup: a rebuilt view differs from the live one.
+    queues.delete(bot);
+    const state = viewState(bot);
+    const saved = options.archive.loadView(bot)?.map(([l, i]) => ({ start: i * 2 ** l, count: 2 ** l }));
+    if (saved) state.view = saved;
+    let covered = tiles(state.view);
+    if (covered < 0 || covered > data.main.length || state.view.some(part => part.count > 1 && node(bot, part) === undefined)) { state.view = []; state.draining = false; state.cview = null; covered = 0; }
+    if (state.cview && tiles(state.cview) !== covered) state.cview = null;
+    known.delete(bot);
+    const {size,isBuilt}=frozen(bot);
+    for (let i = covered; i < data.main.length; i++) appendToState(bot, state, i, size, isBuilt);
+    if (!state.cview) state.cview = appendCompactionLine(null, state.view, data.main.length - 1, size, isBuilt, true);
+    saveState(bot, state);
     loaded.add(bot);
-  }
-  function fit(bot: string, total = count(bot)) {
-    const view = parts(bot);
-    fold(view, total, part => node(bot, part));
-    saveParts(bot, view);
-  }
-  // Merge the most due built pair until the view fits its budget; never split.
-  function fold(view: Part[], total: number, text: (part: Part) => string | undefined, used = view.reduce((sum, p) => sum + partBytes(p, text), 0)) {
-    const size = (p: Part) => partBytes(p, text);
-    while (used > budget) {
-      let best = -1, due = -1;
-      for (let i = 0; i + 1 < view.length; i++) {
-        const a = view[i], b = view[i + 1];
-        if (a.count !== b.count || a.start % (a.count * 2) !== 0 || b.start !== a.start + a.count) continue;
-        if (text({ start: a.start, count: a.count * 2 }) === undefined) continue;
-        const weight = (total - a.start) / (a.count * 4);
-        if (weight > due) { best = i; due = weight; }
-      }
-      if (best < 0) break;
-      const a = view[best], b = view[best + 1], parent = { start: a.start, count: a.count * 2 };
-      used += size(parent) - size(a) - size(b);
-      view.splice(best, 2, parent);
-    }
-    return used;
   }
   function partBytes(part: Part, text: (part: Part) => string | undefined) { return bytes(text(part) ?? "(not summarized yet: zoom it)"); }
   const temporaryInbox=new Map<string,Map<string,Receipt>>();
   function receipts(bot:string){if(options.archive)return options.archive.receipts(bot);let values=temporaryInbox.get(bot);if(!values)temporaryInbox.set(bot,values=new Map());return values;}
   function receive(bot:string,threadId:string,id:string,parentId:string,text:string){const value={id,parentId,threadId,text,date:new Date(now()).toISOString()};if(options.archive)return options.archive.receive(bot,value);const old=receipts(bot).get(id);if(old){if(old.text!==text||old.threadId!==threadId)throw new Error("Conflicting duplicate queued input");return old;}receipts(bot).set(id,value);return value;}
-  function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId)append(bot,row.threadId,`${row.id}:input`,"user",row.text,row.date);}
-  function append(bot: string, threadId: string, key: string, kind: MemoryKind, text: string, receivedDate?:string, foldView = true) {
+  function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId){const value=inputEntry(row.text);append(bot,row.threadId,`${row.id}:input`,value.kind,value.text,row.date);}}
+  function append(bot: string, threadId: string, key: string, kind: MemoryKind, text: string, receivedDate?:string, foldView = true): number {
+    // A long text is never cut: it is logged as several messages in a row, keyed key, key#2, ... (§1).
+    if (kind !== "echo" && text.length > MESSAGE_CHARS) return chunks(text).map((part, n) => append(bot, threadId, n ? `${key}#${n + 1}` : key, kind, part, receivedDate, foldView))[0]!;
     const old = db.prepare("SELECT idx,kind,text,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, key) as Entry | undefined;
     if (old) {
       if (old.kind !== kind || old.text !== text || old.threadId !== threadId) throw new Error("Conflicting duplicate memory event");
@@ -125,7 +197,9 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     const idx = count(bot), date = receivedDate??new Date(now()).toISOString();
     options.archive?.appendMain(bot,{ i: idx, kind, text, size: bytes(`${kind}: ${text}`), date, eventKey: key, threadId });
     db.prepare("INSERT INTO optchat_log VALUES (?,?,?,?,?,?,?)").run(bot, idx, key, kind, text, date, threadId);
-    if (foldView) { const view = parts(bot); view.push({ start: idx, count: 1 }); saveParts(bot, view); fit(bot); }
+    queues.get(bot)?.leaves.push(idx);
+    if (bytes(`${kind}: ${text}`) <= NODE_BYTES) saveNode(bot, idx, 1, `${kind}: ${text}`);
+    if (foldView) { const state = viewState(bot); appendToState(bot, state, idx, sized(bot), built(bot)); saveState(bot, state); }
     return idx;
   }
   function requireLease(bot: string, threadId: string, lease: string) {
@@ -148,88 +222,57 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const leaf = { start: end - 1, count: 1 };
       if (node(bot, leaf) === undefined) {
         const source = entry(bot, leaf.start)!;
-        return { ...leaf, source: `${source.kind}: ${source.text}`, context: contextBefore(bot, leaf.start) };
+        return { ...leaf, source: `${source.kind}: ${source.text}`, context: compactionView(bot, leaf.start) };
       }
       for (let size = 2; size <= end && end % size === 0; size *= 2) {
         const parent = { start: end - size, count: size };
         if (node(bot, parent) !== undefined) continue;
         const a = node(bot, { start: parent.start, count: size / 2 });
         const b = node(bot, { start: parent.start + size / 2, count: size / 2 });
-        if (a !== undefined && b !== undefined) return { ...parent, source: `${a}\n${b}`, children:[a,b], context: contextBefore(bot, parent.start+parent.count) };
+        if (a !== undefined && b !== undefined) return { ...parent, source: `${a}\n${b}`, children:[a,b], context: compactionView(bot, parent.start+parent.count) };
       }
     }
     return null;
   }
-  // During rebuilding a persisted view can contain a parent whose end is beyond
-  // this node. Tile only the built prefix, never expose future or partial text.
-  function contextBefore(bot: string, end: number) {
-    const lines: string[] = [];
+  // A compaction's view ends at the node: the compactions' view up to `end` (split where a line runs past it),
+  // stopping at the first unbuilt line, so no call sees a placeholder or half a message (§4).
+  function compactionView(bot: string, end: number) {
+    const state = viewState(bot), lines: string[] = []; let stopped = false;
     function take(part: Part) {
-      if(part.start>=end) return;
-      if(part.start+part.count>end && part.count>1) {
-        take({start:part.start,count:part.count/2});
-        take({start:part.start+part.count/2,count:part.count/2}); return;
-      }
-      const text=node(bot,part);
-      if(text===undefined) throw new Error("Compactor context is not summarized");
-      lines.push(text.replace(/\r\n|\n|\r/g," "));
+      if (stopped || part.start >= end) return;
+      if (part.start + part.count > end && part.count > 1) { take({ start: part.start, count: part.count / 2 }); take({ start: part.start + part.count / 2, count: part.count / 2 }); return; }
+      const text = node(bot, part);
+      if (text === undefined) { stopped = true; return; }
+      lines.push(`${label(part)}|${text.replace(/\r\n|\n|\r/g, " ")}`);
     }
-    for(const part of parts(bot)) take(part);
+    for (const part of state.cview ?? state.view) take(part);
     return `<chat>\n${lines.join("\n")}\n</chat>`;
   }
   function drainFree(bot: string) {
     let task: Compression | null;
     while ((task = pending(bot)) && bytes(task.source) <= NODE_BYTES) {
       saveNode(bot, task.start, task.count, task.source);
-      fit(bot);
     }
     return task;
   }
+  /**
+   * Ready compactions (§4): a message's node once fewer than 8 lines before it are unbuilt (the first 8 unbuilt
+   * messages), and every merge whose halves are built. Oldest first.
+   */
   function available(bot:string,busy:ReadonlySet<string>,limit:number) {
-    const total=count(bot), built=new Map((db.prepare("SELECT start,count,text FROM optchat_nodes WHERE bot_id=?").all(bot) as (Part&{text:string})[]).map(part=>[label(part),part.text]));
-    function candidates() {
-      const first=parts(bot).find(part=>!built.has(label(part)))?.start??total;
-      const result:Compression[]=[];
-      for(let size=1;size<=total;size*=2) for(let start=0;start+size<=total;start+=size) {
-        const part={start,count:size};
-        if(built.has(label(part))||busy.has(label(part))||(size===1?start:start+size)>first) continue;
-        if(size===1) {const raw=entry(bot,start)!;result.push({...part,source:`${raw.kind}: ${raw.text}`,context:""});}
-        else {const a=built.get(label({start,count:size/2})),b=built.get(label({start:start+size/2,count:size/2}));if(a!==undefined&&b!==undefined)result.push({...part,source:`${a}\n${b}`,children:[a,b],context:""});}
-      }
-      return result;
+    const q=queue(bot), tasks:(Part&{source:string;children?:string[]})[]=[];
+    for(const start of q.leaves.slice(0,8)) {
+      if(busy.has(`${start}+1`)) continue;
+      const raw=entry(bot,start)!; tasks.push({start,count:1,source:`${raw.kind}: ${raw.text}`});
     }
-    // Free nodes advance the same readiness frontier without a network slot. Build them smallest level first,
-    // then oldest (as a full rescan would), but from a queue of newly eligible nodes, folding the view in memory:
-    // rescanning the tree and saving the view per free node froze BB for 15 s after a 150-message import.
-    const view=parts(bot), text=(part:Part)=>built.get(label(part));
-    const frontier=()=>view.find(part=>!built.has(label(part)))?.start??total;
-    const end=(part:Part)=>part.count===1?part.start:part.start+part.count;
-    const source=(part:Part)=>{
-      if(part.count===1){const raw=entry(bot,part.start)!;return `${raw.kind}: ${raw.text}`;}
-      const a=built.get(label({start:part.start,count:part.count/2})),b=built.get(label({start:part.start+part.count/2,count:part.count/2}));
-      return a!==undefined&&b!==undefined?`${a}\n${b}`:undefined;
-    };
-    const queue:{part:Part;source:string}[]=[], queued=new Set<string>();
-    const offer=(part:Part,first:number)=>{
-      if(part.start+part.count>total||built.has(label(part))||busy.has(label(part))||queued.has(label(part))||end(part)>first)return;
-      const value=source(part); if(value===undefined||bytes(value)>NODE_BYTES)return;
-      let at=queue.findIndex(item=>item.part.count>part.count||(item.part.count===part.count&&item.part.start>part.start)); if(at<0)at=queue.length;
-      queue.splice(at,0,{part,source:value}); queued.add(label(part));
-    };
-    let first=frontier();
-    for(let size=1;size<=total;size*=2) for(let start=0;start+size<=total;start+=size) offer({start,count:size},first);
-    let changed=false;
-    while(queue.length) {
-      const {part,source:nodeText}=queue.shift()!; queued.delete(label(part));
-      saveNode(bot,part.start,part.count,nodeText); built.set(label(part),nodeText); changed=true;
-      fold(view,total,text);
-      const before=first; first=frontier();
-      const parent={start:part.start-part.start%(part.count*2),count:part.count*2}; offer(parent,first);
-      // A moved frontier makes leaves and parents ending in (before, first] eligible.
-      for(let size=1;size<=total&&first>before;size*=2) for(let start=Math.max(0,Math.floor((before-(size===1?0:size))/size)*size);start+size<=total&&end({start,count:size})<=first;start+=size) if(end({start,count:size})>before)offer({start,count:size},first);
+    for(const part of q.merges.values()) {
+      if(busy.has(label(part))) continue;
+      const a=node(bot,{start:part.start,count:part.count/2}), b=node(bot,{start:part.start+part.count/2,count:part.count/2});
+      if(a!==undefined&&b!==undefined) tasks.push({...part,source:`${a}\n${b}`,children:[a,b]});
     }
-    if(changed)saveParts(bot,view);
-    return candidates().slice(0,limit).map(task=>({...task,context:contextBefore(bot,task.count===1?task.start:task.start+task.count)}));
+    const end=(task:Part)=>task.count===1?task.start:task.start+task.count;
+    tasks.sort((x,y)=>end(x)-end(y)||x.count-y.count);
+    return tasks.slice(0,limit).map(task=>({...task,context:compactionView(bot,end(task))}));
   }
   return {
     hydrate,
@@ -249,15 +292,16 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const stored=new Set((db.prepare("SELECT start,count FROM optchat_nodes WHERE bot_id=?").all(bot) as Part[]).map(row=>`${Math.log2(row.count)}:${row.start/row.count}`));
       for(const tree of trees)stored.add(`${tree.l}:${tree.i}`);
       for(const tree of trees)if(tree.l>0&&(!stored.has(`${tree.l-1}:${tree.i*2}`)||!stored.has(`${tree.l-1}:${tree.i*2+1}`)))throw new Error("Imported subtree is missing its stored children");
-      // Same incremental fold as appending one by one, but in memory with one save: a per-row save froze BB on long imports.
+      // Messages and their summaries first, then the view's appends in memory with one save: with summaries
+      // missing the view could not merge and every append rescanned it, and a per-row save froze BB.
       db.transaction(()=>{
-        const view=parts(bot), texts=new Map((db.prepare("SELECT start,count,text FROM optchat_nodes WHERE bot_id=?").all(bot) as (Part&{text:string})[]).map(row=>[label(row),row.text]));
-        const lookup=(part:Part)=>texts.get(label(part));let used=view.reduce((sum,part)=>sum+partBytes(part,lookup),0);
-        for(const row of planned){const idx=append(bot,row.threadId,row.eventKey,row.kind,row.text,row.date,false);const leaf={start:idx,count:1};view.push(leaf);used=fold(view,idx+1,lookup,used+partBytes(leaf,lookup));}
-        saveParts(bot,view);
+        const indexes=planned.map(row=>append(bot,row.threadId,row.eventKey,row.kind,row.text,row.date,false));
+        for(const tree of [...trees].sort((x,y)=>x.l-y.l)){const n=2**tree.l,start=tree.i*n;if(node(bot,{start,count:n})===undefined)saveNode(bot,start,n,tree.text);}
+        const state=viewState(bot), {size,isBuilt}=frozen(bot);
+        for(const idx of indexes)appendToState(bot,state,idx,size,isBuilt);
+        saveState(bot,state);
       })();
-      for(const tree of trees){const n=2**tree.l,start=tree.i*n;if(node(bot,{start,count:n})===undefined)saveNode(bot,start,n,tree.text);}
-      fit(bot);return {imported:planned.length,entries:count(bot)};
+      queues.delete(bot);return {imported:planned.length,entries:count(bot)};
     },
     snapshot(bot:string) {
       hydrate(bot);
@@ -270,7 +314,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     },
     recoverQueued(bot:string){const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());const parents=new Set([...receipts(bot).values()].map(row=>row.parentId));for(const id of parents){const run=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,id) as {status:string;expires:number}|undefined;if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))flushInbox(bot,id);}},
     enqueue(bot:string,threadId:string,id:string,parentId:string,text:string){const run=db.prepare("SELECT thread_id AS threadId,status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,parentId) as {threadId:string;status:string;expires:number}|undefined;if(!run||run.threadId!==threadId)throw new Error("Queued input does not belong to this conversation's turn");receive(bot,threadId,id,parentId,text);if(run.status!=="active"||run.expires<=now())flushInbox(bot,parentId);return {ok:true};},
-    input(bot:string,threadId:string,lease:string,id:string,text:string){requireLease(bot,threadId,lease);const row=receipts(bot).get(id);return {id:append(bot,threadId,`${id}:input`,"user",text,row?.date)};},
+    input(bot:string,threadId:string,lease:string,id:string,text:string){requireLease(bot,threadId,lease);const row=receipts(bot).get(id),value=inputEntry(text);return {id:append(bot,threadId,`${id}:input`,value.kind,value.text,row?.date)};},
     free: drainFree,
     available,
     accept(bot:string,task:Compression,text:string) {
@@ -280,15 +324,16 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const a=task.count>1?node(bot,{start:task.start,count:task.count/2}):undefined,b=task.count>1?node(bot,{start:task.start+task.count/2,count:task.count/2}):undefined;
       const source=raw?`${raw.kind}: ${raw.text}`:a!==undefined&&b!==undefined?`${a}\n${b}`:undefined;
       if(source!==task.source) throw new Error("Stale background compression");
-      saveNode(bot,task.start,task.count,text); fit(bot);
+      saveNode(bot,task.start,task.count,text);
     },
-    settled(bot:string) { const view=parts(bot); return view.every(part=>node(bot,part)!==undefined) && view.reduce((sum,part)=>sum+bytes(node(bot,part)!),0)<=budget; },
+    // A turn waits until every line of the view is built (§6); only new messages change its size.
+    settled(bot:string) { return parts(bot).every(part=>node(bot,part)!==undefined); },
     begin: db.transaction((bot: string, threadId: string, requestId: string, input?: string) => {
       const existing = db.prepare("SELECT status,result,answer,thread_id AS threadId FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot, requestId) as { status: string; result: string; answer: string | null; threadId: string } | undefined;
       if (existing && existing.threadId !== threadId) throw new Error("Request belongs to another conversation");
       if (input !== undefined) {
         const previous = db.prepare("SELECT text FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, `${requestId}:input`) as { text: string } | undefined;
-        if (previous && previous.text !== input) throw new Error("Conflicting duplicate request input");
+        if (previous && previous.text !== chunks(inputEntry(input).text)[0]) throw new Error("Conflicting duplicate request input");
         receive(bot,threadId,requestId,requestId,input);
       }
       if (existing?.status === "completed") return { status: "completed" as const, result: existing.result };
@@ -332,12 +377,11 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const task = pending(bot);
       if (!task || task.start !== start || task.count !== size) throw new Error("Stale or out-of-order compression");
       saveNode(bot, start, size, text);
-      fit(bot); return { ok: true };
+      return { ok: true };
     }),
     view(bot: string) {
       const text = `<chat>\n${render(bot)}\n</chat>`;
       const summaryBytes=parts(bot).reduce((sum,part)=>sum+bytes(node(bot,part)!),0);
-      if (summaryBytes > budget) throw new Error("Memory exceeds its budget; complete pending merges before starting a turn");
       return { text, entries: count(bot), bytes: bytes(text), summaryBytes };
     },
     finish: db.transaction((bot: string, thread: string, lease: string, status: "completed" | "failed", result: string) => {

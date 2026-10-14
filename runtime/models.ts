@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { AgentTool, ModelBoundary, ModelEvent, ModelOptions } from "./turn";
-import { MASTER, VIEW_DOC } from "./prompts";
+import { SPEC_SYSTEM } from "./prompts";
 import { cacheBlocks as cacheView, capResult as capToolResult, type TextBlock } from "./cache";
 import {providerPayload} from "./response";
 import { codexModel } from "./codex";
@@ -101,7 +101,7 @@ export function createApiModel(network?:ApiFetch):ModelBoundary {
       const view=prompt.slice(start,split);let input=prompt.slice(split+marker.length,-suffix.length);
     for(const message of options.incoming?.()??[]){yield {kind:"user",id:message.id,text:message.text};input+="\n\n"+message.text;}
       const thoughts:Extract<ModelEvent,{kind:"thought"}>[]=[];let wake:(()=>void)|undefined;
-      const conversation=apiConversation([...cacheView(view),{text:input,cache:false}],{...options,system:`${MASTER}\n\n${VIEW_DOC}\n\n${options.instructions}`,onThought:(id,text)=>{thoughts.push({kind:"thought",id,text});wake?.();}},network);
+      const conversation=apiConversation([...cacheView(view),{text:input,cache:false}],{...options,system:`${SPEC_SYSTEM}\n\n${options.instructions}`,onThought:(id,text)=>{thoughts.push({kind:"thought",id,text});wake?.();}},network);
       let final="";
       for(;;) {
         let complete:{reply:ApiReply}|{error:unknown}|undefined;

@@ -90,7 +90,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     action: z.enum(["begin", "heartbeat", "checkpoint", "record", "work", "merge", "view", "finish", "settled", "zoom", "date", "input", "enqueue"]),
     requestId: z.string().min(1).max(128).optional(), lease: z.string().uuid().optional(),
     parentId:z.string().min(1).max(128).optional(),
-    key: z.string().min(1).max(256).optional(), kind: z.enum(["user", "talk", "tool", "echo", "note"]).optional(),
+    key: z.string().min(1).max(256).optional(), kind: z.enum(["user", "talk", "tool", "echo", "work", "note"]).optional(),
     text: z.string().optional(), start: z.number().int().nonnegative().optional(),
     count: z.number().int().positive().optional(), status: z.enum(["completed", "failed"]).optional(),
   }).strict();

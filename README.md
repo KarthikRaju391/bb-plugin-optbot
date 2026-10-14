@@ -4,8 +4,8 @@
 by Tobias Lütke.** It keeps the Bots Sidebar experience (named bots, avatars,
 sections, project roles, conversation trees, `@` mentions and bot-to-bot
 messages) and replaces how a bot remembers with
-[OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449),
-Victor Taelin's design for one endless chat whose history is its memory.
+[OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449)
+(now UniiChat), Victor Taelin's design for one endless chat whose history is its memory.
 
 OptBot is a separate BB plugin (ID `optbot`). It does not read, change or migrate
 an installed Bots Sidebar's bots or data; both can be installed side by side.
@@ -96,21 +96,26 @@ bb plugin config optbot set compactorExecutable /absolute/path/to/pi
 ## How the memory works
 
 Each bot has one memory, shared by all of its conversations and isolated from
-other bots. It follows the OptChat specification:
+other bots. It follows the current OptChat specification (renamed UniiChat in its
+2026-10-08 revision):
 
-1. **The log.** Every user message, reply, tool call and tool result (capped at
-   30,000 characters, start and end kept) is appended to daily JSONL files and
-   never edited.
+1. **The log.** Every user message, reply, tool call, tool result and report from
+   another thread or bot (`work`, starting `[Name]`) is appended to daily JSONL
+   files and never edited. Tool results keep 30,000 characters (start and end);
+   any other longer text is logged as several messages in a row.
 2. **The tree.** In the background, each message is compressed into a line of at
-   most 512 bytes, and adjacent lines are merged pairwise into a binary tree. Short
-   messages are stored word for word. The summarizer ranks your own words first,
-   so the latest decision survives.
-3. **The view.** Every turn sees a bounded view (128 KB) of the whole history:
-   recent messages one line each, older ones many per line. Merges happen mostly
-   among the oldest lines, so most of the view stays the same between turns.
-4. **The turn.** Each message starts a fresh worker with the spec's system
-   prompts, the view and your message. When a line is too vague, the agent calls
+   most 512 bytes, and adjacent lines are merged pairwise into a binary tree. A
+   message or pair that fits in 512 bytes is its own line, word for word. Up to 8
+   summaries run at once.
+3. **The view.** Every turn sees the whole history as summary lines, recent ones
+   fine and old ones coarse. Each new message appends a line; once the view passes
+   128 KB, one batch merges the most due pairs (Taelin's rollback-push order) down
+   to 64 KB. The view is saved (`view.json`) and never rebuilt.
+4. **The turn.** Each message starts a fresh worker with the spec's system prompt,
+   the view and your message. When a line is too vague, the agent calls
    `optbot_memory` to zoom into it, down to the original message, or to date it.
+5. **Summaries** use the same system prompt and a smaller 16-32 KB view of their
+   own, with the spec's task text and a 512-dash ruler.
 
 ## Operator commands
 

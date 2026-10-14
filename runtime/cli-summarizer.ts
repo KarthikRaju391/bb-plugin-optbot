@@ -20,9 +20,9 @@ export function cliRef(value: string): { cli: Cli; model: string | null } {
   if (!match || /\s/.test(match[2] ?? "")) throw new Error("Select bb/claude-code[/<model>] or bb/pi[/<provider>/<model>].");
   return { cli: match[1] as Cli, model: match[2] ?? null };
 }
-// Each CLI runs one prompt with no tools, no extensions/MCP/skills, no settings and no saved session.
+// Each CLI runs one prompt with no tools (Claude at xhigh effort, as the spec runs Haiku), no extensions/MCP/skills, no settings and no saved session.
 function invocation(cli: Cli, model: string | null, system: string) {
-  if (cli === "claude-code") return { bin: "claude", env: "OPTBOT_CLAUDE_EXECUTABLE", args: ["--print", "--output-format", "text", "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence", "--system-prompt", system, ...(model ? ["--model", model] : [])] };
+  if (cli === "claude-code") return { bin: "claude", env: "OPTBOT_CLAUDE_EXECUTABLE", args: ["--print", "--output-format", "text", "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence", "--system-prompt", system, "--effort", "xhigh", ...(model ? ["--model", model] : [])] };
   // Pi: the spec's medium effort unless the model pattern names a thinking level.
   return { bin: "pi", env: "OPTBOT_PI_EXECUTABLE", args: ["--print", "--mode", "text", "--no-tools", "--no-extensions", "--no-skills", "--no-session", "--system-prompt", system, ...(model ? ["--model", model.includes(":") ? model : `${model}:medium`] : [])] };
 }

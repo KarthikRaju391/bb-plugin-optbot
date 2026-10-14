@@ -6,7 +6,7 @@ import { experimental_resolveExecutablePath } from "@get-bb/plugin-sdk/provider-
 import type { ModelBoundary, ModelEvent, ModelOptions } from "./turn";
 import type { ApiConversation, ApiOptions } from "./models";
 import { capResult } from "./cache";
-import { MASTER, VIEW_DOC } from "./prompts";
+import { SPEC_SYSTEM } from "./prompts";
 
 type Frame = { id?: string | number; method?: string; params?: any; result?: any; error?: unknown };
 export function codexRef(value: string) {
@@ -127,7 +127,7 @@ async function* turn(state: Awaited<ReturnType<typeof session>>, prompt: string,
 }
 export const codexModel: ModelBoundary = {
   async *stream(prompt, options) {
-    const state = await session({ ...options, system: `${MASTER}\n\n${VIEW_DOC}\n\n${options.instructions}` });
+    const state = await session({ ...options, system: `${SPEC_SYSTEM}\n\n${options.instructions}` });
     try {
       let input = prompt;
       for (;;) {

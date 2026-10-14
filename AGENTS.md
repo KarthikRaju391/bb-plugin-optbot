@@ -7,18 +7,24 @@ roles and coordination, and replaces bot memory with Victor Taelin's
 It is a separate plugin (runtime ID `optbot`); it never reads or changes an
 installed Bots Sidebar's data.
 
-## Memory contract (OptChat)
+## Memory contract (OptChat, now UniiChat; gist revision 2026-10-08)
 
 - Canonical per-bot log and summary tree: daily JSONL under `chat/<bot-id>/main/`
-  and `tree/`, append-only and fsynced. SQLite holds indexes and BB metadata only.
-  Never edit or delete history.
-- Follow the spec: purely binary tree, free verbatim nodes, a tool-less compactor
-  with the verbatim COMPACT prompt (512-byte lines, 8 jobs, 10 s retry, shortest
-  try kept), an incremental never-split view fold, and turns that start only on a
-  settled view.
-- Prompts: MASTER and VIEW_DOC verbatim (VIEW_DOC adapted only for the
-  `optbot_memory` tool call syntax). The agent's memory tools are the spec's
-  `zoom` and `date` only.
+  and `tree/`, append-only and fsynced, plus `view.json`. SQLite holds indexes and
+  BB metadata. Never edit or delete history.
+- Kinds: user, talk (the agent's replies), tool, echo, work (reports from other
+  threads or bots, "[Name] ..."), note. Tool output is clipped to 30,000 chars;
+  any other longer text is logged as several messages.
+- Tree: purely binary, 512-byte lines, sources that fit are their own node. Ready
+  work lives in queues (lib/optchat.ts `queue`): the first 8 unbuilt messages and
+  every merge whose halves are built; up to 8 jobs, 5 tries keeping the shortest.
+- View (lib/view.ts): only a new message changes it. due = (T - last)/2^l, oldest
+  on ties (matches Taelin's push). Sawtooth 128 KB -> 64 KB in one batch. Saved and
+  reloaded, never rebuilt (only built from the log when no view exists).
+- Compactions: the same system prompt as turns, their own 16-32 KB view ending at
+  the node, the spec's task text with a 512-dash ruler and its "Too long" retry.
+- Prompt: runtime/prompts.ts `SYSTEM`, the spec's prompt with Unii renamed
+  OptBot; adaptations are listed at its top. Memory tools are `zoom` and `date`.
 - Plugin code runs on BB's server event loop. Never do synchronous work per
   message across the whole history (fold the view in memory and save once).
 
