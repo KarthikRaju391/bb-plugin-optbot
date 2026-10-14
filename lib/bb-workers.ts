@@ -49,6 +49,15 @@ export async function retryReads<T>(read:()=>Promise<T>,delays:readonly number[]
   catch(error) {if(!transientNetworkError(error)||attempt>=delays.length)throw error;await sleep(delays[attempt]!);}
  }
 }
+type Question={prompt:string;shortLabel?:string|null;multiSelect?:boolean;options?:{label:string;description?:string|null}[]|null};
+/** A worker's interactive question, as a plain reply the user can answer in the conversation. */
+export function questionText(questions:readonly Question[]) {
+ return questions.map((question,index)=>[
+  `${questions.length>1?`${index+1}. `:""}${question.shortLabel?`**${question.shortLabel}:** `:""}${question.prompt}`,
+  ...(question.options??[]).map(option=>`   - ${option.label}${option.description?`: ${option.description}`:""}`),
+  ...(question.multiSelect?["   (You can pick more than one.)"]:[]),
+ ].join("\n")).join("\n\n");
+}
 export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly number[]}={}) {
  const read=<T,>(fn:()=>Promise<T>)=>retryReads(fn,options.retryDelays);
  const db=bb.storage.database();
@@ -95,7 +104,7 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   locks.set(args.key,run);try{return await run;}finally{if(locks.get(args.key)===run)locks.delete(args.key);}
  }
  async function poll(workerId:string,cursor?:string):Promise<WorkerPage> {return locked(`worker:${workerId}`,async()=>{
-  const rows=await read(()=>bb.sdk.threads.events.list({threadId:workerId,afterSeq:cursor,order:"asc",limit:"100",types:["item/completed","turn/completed","system/thread/interrupted"]}));
+  const rows=await read(()=>bb.sdk.threads.events.list({threadId:workerId,afterSeq:cursor,order:"asc",limit:"100",types:["item/completed","turn/completed","system/thread/interrupted","system/interaction/lifecycle"]}));
   const events:ModelEvent[]=[];let done=false;
   for(const row of rows) {
    cursor=String(row.seq);
@@ -107,6 +116,16 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
     db.prepare("UPDATE optbot_workers SET pending_result=? WHERE worker=?").run(JSON.stringify(result),workerId);
    } else if(row.type==="system/thread/interrupted") {
     throw new Error(`Native execution was interrupted: @thread:${workerId}`);
+   } else if(row.type==="system/interaction/lifecycle"&&row.data.interaction.status==="pending") {
+    // The worker is hidden, so nobody can answer a question or approval there. The turn ends with the
+    // question as the bot's reply; the user answers in the conversation, which the next turn remembers.
+    const interaction=row.data.interaction;
+    const text=interaction.payload.kind==="user_question"?questionText(interaction.payload.questions):`The work stopped at a ${interaction.payload.kind.replace(/_/g," ")} request that only you can answer. Tell me how to proceed.`;
+    try{await bb.sdk.threads.interactions.cancel({threadId:workerId,interactionId:interaction.id});}catch{/* stopping the worker below also ends it */}
+    try{await bb.sdk.threads.stop({threadId:workerId});}catch{/* the turn's cleanup stops it again */}
+    events.push({kind:"result",success:true,text});
+    db.prepare("UPDATE optbot_workers SET status='completed' WHERE worker=?").run(workerId);
+    return {events,cursor,done:true};
    }
   }
   if(rows.length<100) {

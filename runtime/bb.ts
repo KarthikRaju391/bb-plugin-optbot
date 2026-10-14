@@ -9,13 +9,15 @@ export function bbModelRef(value:string) {
 }
 export type WorkerCall=(input:Record<string,unknown>)=>Promise<unknown>;
 export type WorkerPage={events:ModelEvent[];cursor?:string;done:boolean};
+// The worker thread is hidden: an interactive question there would wait forever, so questions go in the reply.
+const WORKER_NOTE="You run in a hidden worker thread that nobody watches. Never use interactive question or approval tools such as AskUserQuestion; when you need the user's decision, end your turn and ask in your reply.";
 export function bbWorkerModel(call:WorkerCall):ModelBoundary {
  return {
   async *stream(prompt,options) {
    bbModelRef(options.model); options.signal.throwIfAborted();
    const key=randomUUID();let workerId:string|undefined,cursor:string|undefined;
    try {
-    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:[MASTER,BB_VIEW_DOC,options.instructions].filter(Boolean).join("\n\n"),permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
+    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:[MASTER,BB_VIEW_DOC,WORKER_NOTE,options.instructions].filter(Boolean).join("\n\n"),permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
     for(;;) {
      options.signal.throwIfAborted();
      const incoming=options.incoming?.()??[];
