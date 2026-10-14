@@ -32,6 +32,25 @@ function writeLine(path: string, value: unknown) {
   const dir = openSync(dirname(path), constants.O_RDONLY); try { fsyncSync(dir); } finally { closeSync(dir); }
 }
 
+// view.json: the view as [l, i] pairs (spec §1), loaded at start, never rebuilt. Plain functions of the chat folder,
+// so a reloaded plugin can use them even while the archive writer it shares was created by the previous version.
+function readView(root: string, bot: string, warn: (message: string) => void): [number, number][] | null {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(bot)) throw new Error("Invalid bot ID");
+  const path = join(root, bot, "view.json");
+  if (!existsSync(path)) return null;
+  if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error("Unsafe OptChat view file");
+  try { return viewSchema.parse(JSON.parse(readFileSync(path, "utf8"))); } catch { warn("Skipped an invalid view.json"); return null; }
+}
+function writeView(root: string, bot: string, pairs: [number, number][]) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(bot)) throw new Error("Invalid bot ID");
+  const dir = join(root, bot); directory(dir);
+  const path = join(dir, "view.json"), temp = join(dir, ".view.json.tmp");
+  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+  // Atomic, not synced: data.db holds the durable copy, and a torn or stale file falls back to it.
+  try { const data = Buffer.from(JSON.stringify(pairs)); if (writeSync(fd, data) !== data.length) throw new Error("Incomplete OptChat view write"); } finally { closeSync(fd); }
+  renameSync(temp, path);
+}
+
 /** One process owns all per-bot streams. The socket is an OS-lifetime lock, not a PID/TTL lock. */
 async function createArchive(rootPath: string, warn: (message: string) => void = () => {}) {
   directory(resolve(rootPath)); const root = realpathSync(resolve(rootPath));
@@ -126,20 +145,8 @@ async function createArchive(rootPath: string, warn: (message: string) => void =
       if (valid.size !== bytes(valid.text) || (valid.i+1)*2**valid.l > data.main.length) throw new Error("Invalid OptChat node range or size");
       writeLine(join(root,bot,"tree",localDay()+".jsonl"),valid); data.tree.set(key,valid);
     },
-    /** view.json: the view as [l, i] pairs (spec §1). Saved on every change, loaded at start, never rebuilt. */
-    loadView(bot: string): [number, number][] | null {
-      load(bot); const path = join(root, bot, "view.json");
-      if (!existsSync(path)) return null;
-      if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error("Unsafe OptChat view file");
-      try { return viewSchema.parse(JSON.parse(readFileSync(path, "utf8"))); } catch { warn("Skipped an invalid view.json"); return null; }
-    },
-    saveView(bot: string, pairs: [number, number][]) {
-      load(bot); const dir = join(root, bot), path = join(dir, "view.json"), temp = join(dir, ".view.json.tmp");
-      const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
-      // Atomic, not synced: data.db holds the durable copy, and a torn or stale file falls back to it.
-      try { const data = Buffer.from(JSON.stringify(pairs)); if (writeSync(fd, data) !== data.length) throw new Error("Incomplete OptChat view write"); } finally { closeSync(fd); }
-      renameSync(temp, path);
-    },
+    loadView(bot: string) { load(bot); return readView(root, bot, warn); },
+    saveView(bot: string, pairs: [number, number][]) { load(bot); writeView(root, bot, pairs); },
     async close() { if (closed) return; closed=true; await new Promise<void>((resolveClose,reject)=>server.close(error=>error?reject(error):resolveClose())); },
   };
 }
@@ -159,7 +166,7 @@ export async function openArchive(rootPath: string, warn: (message: string) => v
     void shared.value.catch(()=>{ if(registry.get(root)===shared) registry.delete(root); });
   }
   shared.refs++;
-  const value = await shared.value;
+  const value = await shared.value, realRoot = realpathSync(root);
   let released = false;
   const live = () => { if(released) throw new Error("OptChat archive handle is closed"); };
   return {
@@ -169,8 +176,9 @@ export async function openArchive(rootPath: string, warn: (message: string) => v
     receive(bot,row){live();return value.receive(bot,row);},
     appendMain(bot,line) { live(); return value.appendMain(bot,line); },
     appendTree(bot,line) { live(); return value.appendTree(bot,line); },
-    loadView(bot) { live(); return value.loadView(bot); },
-    saveView(bot,pairs) { live(); return value.saveView(bot,pairs); },
+    // Not through `value`: after a reload it can be the previous version's writer, without these methods.
+    loadView(bot) { live(); value.load(bot); return readView(realRoot, bot, warn); },
+    saveView(bot,pairs) { live(); value.load(bot); writeView(realRoot, bot, pairs); },
     async close() {
       if(released) return; released=true;
       if(--shared.refs===0) {

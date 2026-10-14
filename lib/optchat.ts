@@ -185,9 +185,21 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   const temporaryInbox=new Map<string,Map<string,Receipt>>();
   function receipts(bot:string){if(options.archive)return options.archive.receipts(bot);let values=temporaryInbox.get(bot);if(!values)temporaryInbox.set(bot,values=new Map());return values;}
   function receive(bot:string,threadId:string,id:string,parentId:string,text:string){const value={id,parentId,threadId,text,date:new Date(now()).toISOString()};if(options.archive)return options.archive.receive(bot,value);const old=receipts(bot).get(id);if(old){if(old.text!==text||old.threadId!==threadId)throw new Error("Conflicting duplicate queued input");return old;}receipts(bot).set(id,value);return value;}
-  function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId){const value=inputEntry(row.text);append(bot,row.threadId,`${row.id}:input`,value.kind,value.text,row.date);}}
+  // An input logged before reports became `work` stays as it was: the log is permanent, so a replay of its
+  // receipt (startup recovery, a retried delivery) must match the old entry, not log it again differently.
+  function appendInput(bot:string,threadId:string,key:string,raw:string,date?:string) {
+    const old=db.prepare("SELECT idx,kind,text,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot,key) as Entry|undefined;
+    if(old&&old.kind==="user"&&old.text===raw&&old.threadId===threadId)return old.idx;
+    const value=inputEntry(raw);return append(bot,threadId,key,value.kind,value.text,date);
+  }
+  function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);}
   function append(bot: string, threadId: string, key: string, kind: MemoryKind, text: string, receivedDate?:string, foldView = true): number {
     // A long text is never cut: it is logged as several messages in a row, keyed key, key#2, ... (§1).
+    if (kind !== "echo" && text.length > MESSAGE_CHARS) {
+      // Logged whole by an earlier OptBot: keep it.
+      const whole = db.prepare("SELECT idx,kind,text FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, key) as { idx: number; kind: string; text: string } | undefined;
+      if (whole && whole.kind === kind && whole.text === text) return whole.idx;
+    }
     if (kind !== "echo" && text.length > MESSAGE_CHARS) return chunks(text).map((part, n) => append(bot, threadId, n ? `${key}#${n + 1}` : key, kind, part, receivedDate, foldView))[0]!;
     const old = db.prepare("SELECT idx,kind,text,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, key) as Entry | undefined;
     if (old) {
@@ -314,7 +326,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     },
     recoverQueued(bot:string){const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());const parents=new Set([...receipts(bot).values()].map(row=>row.parentId));for(const id of parents){const run=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,id) as {status:string;expires:number}|undefined;if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))flushInbox(bot,id);}},
     enqueue(bot:string,threadId:string,id:string,parentId:string,text:string){const run=db.prepare("SELECT thread_id AS threadId,status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,parentId) as {threadId:string;status:string;expires:number}|undefined;if(!run||run.threadId!==threadId)throw new Error("Queued input does not belong to this conversation's turn");receive(bot,threadId,id,parentId,text);if(run.status!=="active"||run.expires<=now())flushInbox(bot,parentId);return {ok:true};},
-    input(bot:string,threadId:string,lease:string,id:string,text:string){requireLease(bot,threadId,lease);const row=receipts(bot).get(id),value=inputEntry(text);return {id:append(bot,threadId,`${id}:input`,value.kind,value.text,row?.date)};},
+    input(bot:string,threadId:string,lease:string,id:string,text:string){requireLease(bot,threadId,lease);const row=receipts(bot).get(id);return {id:appendInput(bot,threadId,`${id}:input`,text,row?.date)};},
     free: drainFree,
     available,
     accept(bot:string,task:Compression,text:string) {
@@ -333,7 +345,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       if (existing && existing.threadId !== threadId) throw new Error("Request belongs to another conversation");
       if (input !== undefined) {
         const previous = db.prepare("SELECT text FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, `${requestId}:input`) as { text: string } | undefined;
-        if (previous && previous.text !== chunks(inputEntry(input).text)[0]) throw new Error("Conflicting duplicate request input");
+        if (previous && previous.text !== chunks(inputEntry(input).text)[0] && previous.text !== input) throw new Error("Conflicting duplicate request input");
         receive(bot,threadId,requestId,requestId,input);
       }
       if (existing?.status === "completed") return { status: "completed" as const, result: existing.result };

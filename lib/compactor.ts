@@ -38,9 +38,20 @@ function createCompactor(initial:CompactorConfig) {
     queued.add(bot);
     queueMicrotask(()=>{
       queued.delete(bot); if(closed||active.size>=JOBS) return;
-      config.chat.hydrate(bot);config.chat.recoverQueued(bot);
-      const busy=new Set([...active.values()].filter(job=>job.bot===bot).map(job=>`${job.task.start}+${job.task.count}`));
-      for(const task of config.chat.available(bot,busy,JOBS-active.size)) {
+      // This runs outside any request: an error thrown here would be uncaught and take down BB's whole server.
+      // Report it and let waiting turns end with it instead; the monitor tries again in a second.
+      let tasks:ReturnType<OptChat["available"]>;
+      try {
+        config.chat.hydrate(bot);config.chat.recoverQueued(bot);
+        const busy=new Set([...active.values()].filter(job=>job.bot===bot).map(job=>`${job.task.start}+${job.task.count}`));
+        tasks=config.chat.available(bot,busy,JOBS-active.size);
+      } catch(error) {
+        const message=error instanceof Error?error.message:String(error);
+        if(problems.get(bot)?.message!==message)config.report(`Memory of ${bot} could not be prepared: ${message}`);
+        problems.set(bot,{message,since:problems.get(bot)?.since??Date.now()});
+        return;
+      }
+      for(const task of tasks) {
         const key=`${bot}:${task.start}:${task.count}`;let failed=false;
         const work=Promise.resolve().then(async()=>(config.compact??compactNode)(task,await config.options(controller.signal))).then(line=>{
           if(!closed) config.chat.accept(bot,task,line); failures.delete(key); problems.delete(bot);
