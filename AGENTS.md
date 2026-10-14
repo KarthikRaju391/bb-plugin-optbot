@@ -220,3 +220,14 @@ or reintroduce hover toolbars when making unrelated changes.
 - Frame messages as asynchronous agent coordination, not user approval. Include an exact
   sender-conversation reply command and discourage acknowledgement-only loops.
   Test delivery with the SDK fake host; never send unsolicited live test messages.
+
+## Deploying
+
+1. Before a reload, replay startup (hydrate, recoverQueued, available) on a copy of the live
+   plugin data (`chat/` and a `sqlite3 .backup` of `data.db`). Plugin server code runs inside BB's
+   server: an uncaught error there restarts BB, and BB disables the plugin after repeated crashes.
+   New logging rules must accept entries already in the permanent log.
+2. Reload only when no OptBot conversation has an active turn.
+3. After `bb plugin reload optbot`, stop every idle conversation whose provider is `optbot`
+   (`bb thread list --json`), not only the bots' main ones: each keeps its bridge, and the old
+   host code (prompts, turn logic) until it is restarted. Restart busy ones when their turn ends.
