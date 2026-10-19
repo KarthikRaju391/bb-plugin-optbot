@@ -31,13 +31,8 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
      cursor=page.cursor??cursor; open=page.done?[]:page.open??open;
      for(const event of page.events)if(event.kind!=="result")yield event;
      if(page.done) {
-      const late=options.incoming?.()??[];
-      if(late.length) {
-       await call({action:"steer",workerId,text:late.map(message=>message.text).join("\n\n")});
-       for(const message of late)yield {kind:"user",...message};
-       continue;
-      }
-
+      // Messages that came after the worker's last step stay queued: the turn answers them with a new call
+      // and a fresh view (UniiChat Server.ts), never by reopening this session.
       for(const event of page.events)if(event.kind==="result")yield event;
       break;
      }

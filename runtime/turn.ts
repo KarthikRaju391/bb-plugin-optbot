@@ -85,29 +85,42 @@ export async function runOptChatTurn(args: {
       args.onEvent({ kind: "talk", id: `recovered:${args.requestId}`, text: begin.answer });
       return begin.answer;
     }
-    const view = await call({ action: "view", lease }) as { text: string };
+    let view = await call({ action: "view", lease }) as { text: string };
     await call({ action: "input", lease, requestId:args.requestId, text: args.input });
-    let result: string | undefined;
-    let lastTalk = "";
-    for await (const event of model.stream(`${view.text}\n\n<current-request>\n${args.input}\n</current-request>`, options)) {
-      check();
-      if (event.kind === "result") {
-        if (!event.success) throw new Error(event.text || "Model turn failed");
-        result = event.text; continue;
+    let request = args.input, result: string | undefined;
+    for (let round = 0; ; round++) {
+      result = undefined;
+      let lastTalk = "";
+      for await (const event of model.stream(`${view.text}\n\n<current-request>\n${request}\n</current-request>`, options)) {
+        check();
+        if (event.kind === "result") {
+          if (!event.success) throw new Error(event.text || "Model turn failed");
+          result = event.text; continue;
+        }
+        if (event.kind === "thought") { args.onEvent(event); continue; }
+        if(event.kind==="user"){await call({action:"input",lease,requestId:event.id,text:event.text});args.onEvent(event);continue;}
+        const kind: MemoryKind = event.kind === "talk" ? "talk" : event.kind === "tool" ? "tool" : "echo";
+        // UniiChat's log text: a call is its name and JSON input; a failed result starts "error: ".
+        const text = event.kind === "tool" ? toolText(event.name, event.input) : event.kind === "echo" ? (event.error ? "error: " : "") + (event.text || "(no output)") : event.text;
+        await call({ action: "record", lease, key: `${attempt}:${event.kind}:${event.id}`, kind, text });
+        if (event.kind === "talk") lastTalk = event.text;
+        args.onEvent(event);
       }
-      if (event.kind === "thought") { args.onEvent(event); continue; }
-      if(event.kind==="user"){await call({action:"input",lease,requestId:event.id,text:event.text});args.onEvent(event);continue;}
-      const kind: MemoryKind = event.kind === "talk" ? "talk" : event.kind === "tool" ? "tool" : "echo";
-      // UniiChat's log text: a call is its name and JSON input; a failed result starts "error: ".
-      const text = event.kind === "tool" ? toolText(event.name, event.input) : event.kind === "echo" ? (event.error ? "error: " : "") + (event.text || "(no output)") : event.text;
-      await call({ action: "record", lease, key: `${attempt}:${event.kind}:${event.id}`, kind, text });
-      if (event.kind === "talk") lastTalk = event.text;
-      args.onEvent(event);
-    }
-    if (result === undefined) throw new Error("Model exited without a completed result");
-    if (result && result !== lastTalk) {
-      await call({ action: "record", lease, key: `${attempt}:final`, kind: "talk", text: result });
-      args.onEvent({ kind: "talk", id: `${attempt}:final`, text: result });
+      if (result === undefined) throw new Error("Model exited without a completed result");
+      if (result && result !== lastTalk) {
+        const key = round ? `${attempt}:${round}:final` : `${attempt}:final`;
+        await call({ action: "record", lease, key, kind: "talk", text: result });
+        args.onEvent({ kind: "talk", id: key, text: result });
+      }
+      // Messages the call did not take start a new call with a fresh view, rendered before they are logged
+      // (UniiChat: a call's leftover messages wait for the next call; nothing carries over but the view).
+      const left = options.incoming?.() ?? [];
+      if (!left.length) break;
+      check();
+      await settle();
+      view = await call({ action: "view", lease }) as { text: string };
+      for (const message of left) { await call({ action: "input", lease, requestId: message.id, text: message.text }); args.onEvent({ kind: "user", ...message }); }
+      request = left.map(message => message.text).join("\n\n");
     }
     await call({ action: "checkpoint", lease, text: result });
     if(!args.background) await settle();
