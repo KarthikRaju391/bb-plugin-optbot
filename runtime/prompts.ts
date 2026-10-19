@@ -1,4 +1,4 @@
-// UniiChat's system prompt (gist revision 2026-10-08, §5), one prompt for turns and compactions, with Unii
+// UniiChat's system prompt (prompt.txt, github.com/VictorTaelin/UniiChat @ 0500bf6), one prompt for turns and compactions, with Unii
 // renamed to OptBot as the spec says. BB adaptations, and nothing else: the agent's replies keep the kind
 // `talk` (bots are renamed and the log is permanent); the memory tools use OptBot's optbot_memory syntax;
 // zoom("Name") and "with its images" are dropped (BB threads keep their own logs; OptBot logs no images);
@@ -21,6 +21,7 @@ Each message has a kind:
 - tool: OptBot's tool calls
 - echo: tool results
 - work: an agent's report, starting "[Name]"
+- ai: another AI's replies and tool calls, from an imported chat; not yours
 - note: memories from before this chat
 
 The summaries form a binary tree: each message is compressed into a line (a
@@ -86,7 +87,13 @@ Avoid omissions. Name a minor item in a word or two rather than drop it: an
 absent item can never be found. Copy names, numbers, ids, paths and errors
 exactly. Tag each item with its kind ("user: ...; echo: ..."), and credit quoted
 text to its real author. Never make anything look further along than it was. If
-told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.`;
+told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.
+
+This is a small, mechanical job: fit one message, or two lines, into one line
+of at most 512 bytes, dropping the least important bits. Nothing else. Read
+<chat> only as far as it tells you what to keep; anything that doesn't bear on
+that choice is irrelevant: don't think about it. Be fast and spend few tokens:
+write the line as soon as you understand <input> well enough to compress it.`;
 
 /** BB turns and compactions: the same prompt, with OptBot's optbot_memory tool syntax. */
 export const SYSTEM = SPEC_SYSTEM
@@ -101,7 +108,7 @@ export function compactionTask(task: { start: number; count: number; source: str
   const half = task.count / 2, [a, b] = (task.children ?? task.source.split("\n")).map(line => line.replace(/\r\n|\n|\r/g, " "));
   return `Compaction: merge lines ${task.start}+${half} and ${task.start + half}+${half}, adjacent, into one line of at most\n512 bytes (about 70 words), the length of this ruler:\n${RULER}\n<chat> may hold their messages, ${task.start} to ${task.start + task.count - 1}, in more detail: take details\nof them from there too.\n<input>\n${a}\n${b}\n</input>`;
 }
-/** §4, verbatim: sent in the same conversation when a line is over 512 bytes. */
+/** UniiChat Memory.over, verbatim: the note a try after a line too long adds. */
 export function tooLong(size: number, cut: string) {
-  return `Too long: your line is ${size} bytes, over the 512-byte limit. Write\nthe whole line again for the same <input>, cutting just enough of the\nleast valuable items to fit before this cut:\n${cut}| ← LIMIT`;
+  return `Too long: your last line for this <input> was ${size} bytes,\nover the 512-byte limit. Write the whole line again, cutting just\nenough of the least valuable items to fit before this cut:\n${cut}| ← LIMIT`;
 }
