@@ -7,7 +7,7 @@ export const NODE_BYTES = 512;
 export const VIEW_BYTES = VIEW_HIGH;
 const LEASE_MS = 60_000;
 export type MemoryKind = "user" | "talk" | "tool" | "echo" | "work" | "note";
-/** Tool output is clipped to this many characters; any other longer text is logged over several messages (§1). */
+/** A page: command output is clipped to this many characters; any longer text is logged over several messages (§1). */
 export const MESSAGE_CHARS = 30_000;
 /**
  * An incoming message as the log records it (§1): a report from another BB thread or bot is `work`, starting
@@ -21,13 +21,16 @@ export function inputEntry(text: string): { kind: MemoryKind; text: string } {
   if (bot) { if (bot[1]!.trim() !== "BB agent") name = bot[1]!.trim(); body = bot[2]!; }
   return { kind: "work", text: `[${name}] ${body}` };
 }
+/** Where the page of a text from `at` ends: MESSAGE_CHARS on, after its last newline if it has one (UniiChat clip_end). */
+export function pageEnd(text: string, at: number) {
+  if (text.length - at <= MESSAGE_CHARS) return text.length;
+  const newline = text.lastIndexOf("\n", at + MESSAGE_CHARS - 1);
+  if (newline >= at) return newline + 1;
+  return at + MESSAGE_CHARS - (/[\uDC00-\uDFFF]/.test(text[at + MESSAGE_CHARS]!) ? 1 : 0); // never split a surrogate pair
+}
 function chunks(text: string) {
   const result: string[] = [];
-  for (let at = 0; at < text.length;) {
-    let end = Math.min(at + MESSAGE_CHARS, text.length);
-    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--; // never split a surrogate pair
-    result.push(text.slice(at, end)); at = end;
-  }
+  for (let at = 0; at < text.length;) { const end = pageEnd(text, at); result.push(text.slice(at, end)); at = end; }
   return result;
 }
 type Part = { start: number; count: number };
@@ -195,12 +198,12 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);}
   function append(bot: string, threadId: string, key: string, kind: MemoryKind, text: string, receivedDate?:string, foldView = true): number {
     // A long text is never cut: it is logged as several messages in a row, keyed key, key#2, ... (§1).
-    if (kind !== "echo" && text.length > MESSAGE_CHARS) {
+    if (text.length > MESSAGE_CHARS) {
       // Logged whole by an earlier OptBot: keep it.
       const whole = db.prepare("SELECT idx,kind,text FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, key) as { idx: number; kind: string; text: string } | undefined;
       if (whole && whole.kind === kind && whole.text === text) return whole.idx;
     }
-    if (kind !== "echo" && text.length > MESSAGE_CHARS) return chunks(text).map((part, n) => append(bot, threadId, n ? `${key}#${n + 1}` : key, kind, part, receivedDate, foldView))[0]!;
+    if (text.length > MESSAGE_CHARS) return chunks(text).map((part, n) => append(bot, threadId, n ? `${key}#${n + 1}` : key, kind, part, receivedDate, foldView))[0]!;
     const old = db.prepare("SELECT idx,kind,text,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, key) as Entry | undefined;
     if (old) {
       if (old.kind !== kind || old.text !== text || old.threadId !== threadId) throw new Error("Conflicting duplicate memory event");

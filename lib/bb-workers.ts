@@ -10,7 +10,8 @@ type NativeItem = Extract<Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["even
 function nativeEvents(item:NativeItem):ModelEvent[] {
  const id=item.id;
  const text=(value:unknown)=>typeof value==="string"?value:JSON.stringify(value)??"";
- const echo=(value:unknown,error=false):ModelEvent=>({kind:"echo",id,text:capResult(text(value)),...(error?{error:true}:{})});
+ // Only command output is clipped to its head and tail (UniiChat Clip.ts); any other result is kept whole and paged.
+ const echo=(value:unknown,error=false):ModelEvent=>({kind:"echo",id,text:text(value),...(error?{error:true}:{})});
  const tool=(name:string,input:unknown,result:unknown,error=false):ModelEvent[]=>[{kind:"tool",id,name,input},echo(result,error)];
  switch(item.type) {
   case "agentMessage":return [{kind:"talk",id,text:item.text}];
@@ -19,7 +20,7 @@ function nativeEvents(item:NativeItem):ModelEvent[] {
   case "plan":return [{kind:"talk",id,text:item.text}];
   case "planSteps":return [{kind:"talk",id,text:text({steps:item.steps,explanation:item.explanation,status:item.status})}];
   case "toolCall":return tool(item.tool,item.arguments??{},item.error??item.result??"",item.status==="failed"||item.status==="interrupted"||!!item.error);
-  case "commandExecution":return tool(item.type,{command:item.command,cwd:item.cwd},{output:item.aggregatedOutput??"",exitCode:item.exitCode,status:item.status,approvalStatus:item.approvalStatus},item.status==="failed"||item.status==="interrupted"||(item.exitCode!==undefined&&item.exitCode!==0));
+  case "commandExecution":return [{kind:"tool",id,name:item.type,input:{command:item.command,cwd:item.cwd}},echo({output:capResult(item.aggregatedOutput??""),exitCode:item.exitCode,status:item.status,approvalStatus:item.approvalStatus},item.status==="failed"||item.status==="interrupted"||(item.exitCode!==undefined&&item.exitCode!==0))];
   case "fileChange":return tool(item.type,{changes:item.changes},{status:item.status,approvalStatus:item.approvalStatus},item.status==="failed"||item.status==="interrupted");
   case "webSearch":return tool(item.type,{queries:item.queries},item.resultText??"");
   case "webFetch":return tool(item.type,{url:item.url,prompt:item.prompt,pattern:item.pattern},item.resultText??"");
