@@ -396,11 +396,12 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const summaryBytes=parts(bot).reduce((sum,part)=>sum+bytes(node(bot,part)!),0);
       return { text, entries: count(bot), bytes: bytes(text), summaryBytes };
     },
-    finish: db.transaction((bot: string, thread: string, lease: string, status: "completed" | "failed", result: string) => {
+    finish: db.transaction((bot: string, thread: string, lease: string, status: "completed" | "failed" | "stopped", result: string) => {
       const run=requireLease(bot, thread, lease);
       flushInbox(bot,run.requestId);
       if (status === "failed") append(bot, thread, `failure:${lease}`, "note", `Attempt failed: ${result}. Verify prior side effects before retrying.`);
-      db.prepare("UPDATE optchat_runs SET status=?,result=?,expires=0 WHERE bot_id=? AND lease=?").run(status, result, bot, lease);
+      if (status === "stopped") append(bot, thread, `stopped:${lease}`, "note", "Stopped by the user: OptBot's turn.");
+      db.prepare("UPDATE optchat_runs SET status=?,result=?,expires=0 WHERE bot_id=? AND lease=?").run(status === "stopped" ? "failed" : status, result, bot, lease);
       return { ok: true };
     }),
     zoom(bot: string, start: number, size: number, offset = 0) {

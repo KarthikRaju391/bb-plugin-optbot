@@ -65,6 +65,7 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
  if(!(db.prepare("PRAGMA table_info(optbot_workers)").all() as {name:string}[]).some(column=>column.name==="pending_result"))db.exec("ALTER TABLE optbot_workers ADD COLUMN pending_result TEXT");
  db.exec("CREATE TABLE IF NOT EXISTS optbot_worker_cancellations (key TEXT PRIMARY KEY,parent TEXT,bot TEXT)");
  const locks=new Map<string,Promise<unknown>>();
+ const open=new Map<string,Map<string,{id:string;name:string;input:unknown}>>();
  let closed=false;
  async function locked<T>(key:string,operation:()=>Promise<T>):Promise<T> {
   const previous=locks.get(key);const run=(previous??Promise.resolve()).catch(()=>{}).then(operation);
@@ -104,12 +105,18 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   locks.set(args.key,run);try{return await run;}finally{if(locks.get(args.key)===run)locks.delete(args.key);}
  }
  async function poll(workerId:string,cursor?:string):Promise<WorkerPage> {return locked(`worker:${workerId}`,async()=>{
-  const rows=await read(()=>bb.sdk.threads.events.list({threadId:workerId,afterSeq:cursor,order:"asc",limit:"100",types:["item/completed","turn/completed","system/thread/interrupted","system/interaction/lifecycle"]}));
+  const rows=await read(()=>bb.sdk.threads.events.list({threadId:workerId,afterSeq:cursor,order:"asc",limit:"100",types:["item/started","item/completed","turn/completed","system/thread/interrupted","system/interaction/lifecycle"]}));
   const events:ModelEvent[]=[];let done=false;
+  let opened=open.get(workerId);if(!opened)open.set(workerId,opened=new Map());
   for(const row of rows) {
    cursor=String(row.seq);
-   if(row.type==="item/completed") {
+   if(row.type==="item/started") {
+    // A started call, kept until its result arrives: if the turn ends first it is logged as it is.
+    const call=nativeEvents(row.data.item as NativeItem).find(event=>event.kind==="tool");
+    if(call?.kind==="tool")opened.set(call.id,{id:call.id,name:call.name,input:call.input});
+   } else if(row.type==="item/completed") {
     const item=row.data.item;
+    opened.delete(item.id);
     events.push(...nativeEvents(item));
    } else if(row.type==="turn/completed") {
     const result:ModelEvent={kind:"result",success:row.data.status==="completed",text:row.data.status==="completed"?"":row.data.error?.message??`BB worker ${row.data.status}`};
@@ -144,7 +151,8 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
    }
   }
   if(done)db.prepare("UPDATE optbot_workers SET status='completed' WHERE worker=?").run(workerId);
-  return {events,cursor,done};
+  if(done)open.delete(workerId);
+  return {events,cursor,done,open:[...opened.values()]};
  });}
  async function stop(workerId:string) {return locked(`worker:${workerId}`,async()=>{
   const row=find(workerId);if(!row||row.status==="stopped")return;

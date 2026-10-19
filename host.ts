@@ -17,7 +17,7 @@ import { apiModel } from "./runtime/models";
 import { bbWorkerModel } from "./runtime/bb";
 import { cachedCatalog, type Catalog } from "./runtime/bb-catalog";
 import { workspaceTools } from "./runtime/workspace";
-import { runOptChatTurn, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
+import { runOptChatTurn, UserStop, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
 
 // Ownership proof stays in BB input for server dispatch/configuration, not user memory.
 function memoryInput<T extends { type: string; text?: string; visibility?: string }>(input: T[]): T[] {
@@ -227,7 +227,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         const state = active.get(params.threadId);
         if (state) {
           state.released = params.intent === "release";
-          state.controller.abort();
+          state.controller.abort(state.released ? new Error("Bridge released") : new UserStop());
           // BB may reconstruct immediately after releasing the runtime. The
           // detached turn still unwinds its lease/worker cleanup, but cannot
           // publish stale deltas or delete a newer turn's state in finally.

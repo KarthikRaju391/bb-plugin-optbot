@@ -8,11 +8,13 @@ export function bbModelRef(value:string) {
  return {providerId:match[1]!,...(match[2]?{model:match[2]}:{})};
 }
 export type WorkerCall=(input:Record<string,unknown>)=>Promise<unknown>;
-export type WorkerPage={events:ModelEvent[];cursor?:string;done:boolean};
+export type WorkerPage={events:ModelEvent[];cursor?:string;done:boolean;open?:{id:string;name:string;input:unknown}[]};
 // The worker thread is hidden: an interactive question there would wait forever, so questions go in the reply.
 const WORKER_NOTE="You run in a hidden worker thread that nobody watches. Never use interactive question or approval tools such as AskUserQuestion; when you need the user's decision, end your turn and ask in your reply.";
 export function bbWorkerModel(call:WorkerCall):ModelBoundary {
+ let open:NonNullable<WorkerPage["open"]>=[];
  return {
+  unanswered:()=>open,
   async *stream(prompt,options) {
    bbModelRef(options.model); options.signal.throwIfAborted();
    const key=randomUUID();let workerId:string|undefined,cursor:string|undefined;
@@ -26,7 +28,7 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
       for(const message of incoming)yield {kind:"user",...message};
      }
      const page=await call({action:"poll",workerId,...(cursor?{cursor}:{})}) as WorkerPage;
-     cursor=page.cursor??cursor;
+     cursor=page.cursor??cursor; open=page.done?[]:page.open??open;
      for(const event of page.events)if(event.kind!=="result")yield event;
      if(page.done) {
       const late=options.incoming?.()??[];

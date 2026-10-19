@@ -12,11 +12,16 @@ export type ModelEvent =
   | { kind: "result"; success: boolean; text: string };
 export type AgentTool = { name: string; description: string; inputSchema: unknown; execute: (input: Record<string, unknown>) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> };
 export type ModelOptions = { cwd: string; model: string; instructions: string; permissionMode: "full" | "plan" | "auto" | "accept-edits"; reasoningLevel?:PluginProviderReasoningLevel;serviceTier?:"default"|"fast";env: NodeJS.ProcessEnv; signal: AbortSignal; tools: AgentTool[]; incoming?: () => { id: string; text: string }[]; onUsage?: (usage: unknown) => void };
+/** The reason a turn's signal carries when the user stops it (not a bridge restart or a failure). */
+export class UserStop extends Error { constructor() { super("Stopped by the user"); } }
 export interface ModelBoundary {
   stream(prompt: string, options: ModelOptions): AsyncIterable<ModelEvent>;
+  /** Tool calls the model started that have no result yet (logged as they are if the turn ends early). */
+  unanswered?(): { id: string; name: string; input: unknown }[];
   summarize(prompt: string, options: Omit<ModelOptions, "tools">): Promise<string>;
 }
 export type MemoryCall = (input: Record<string, unknown>) => Promise<unknown>;
+export function toolText(name: string, input: unknown) { return `${name} ${JSON.stringify(input)}`; }
 export async function runOptChatTurn(args: {
   call: MemoryCall; model: ModelBoundary; requestId: string; input: string;
   options: ModelOptions; compactorModel?: string; onEvent: (event: ModelEvent) => void;
@@ -93,7 +98,8 @@ export async function runOptChatTurn(args: {
       if (event.kind === "thought") { args.onEvent(event); continue; }
       if(event.kind==="user"){await call({action:"input",lease,requestId:event.id,text:event.text});args.onEvent(event);continue;}
       const kind: MemoryKind = event.kind === "talk" ? "talk" : event.kind === "tool" ? "tool" : "echo";
-      const text = event.kind === "tool" ? `${event.name}: ${JSON.stringify(event.input)}` : event.text;
+      // UniiChat's log text: a call is its name and JSON input; a failed result starts "error: ".
+      const text = event.kind === "tool" ? toolText(event.name, event.input) : event.kind === "echo" ? (event.error ? "error: " : "") + (event.text || "(no output)") : event.text;
       await call({ action: "record", lease, key: `${attempt}:${event.kind}:${event.id}`, kind, text });
       if (event.kind === "talk") lastTalk = event.text;
       args.onEvent(event);
@@ -110,7 +116,10 @@ export async function runOptChatTurn(args: {
     return result;
   } catch (error) {
     try {await call({action:"input",lease,requestId:args.requestId,text:args.input});} catch { /* A takeover's durable record wins. */ }
-    try { await call({ action: "finish", lease, status: "failed", text: error instanceof Error ? error.message : String(error) }); } catch { /* Lease takeover already records interruption; never overwrite its state. */ }
+    // Calls left without a result (a stop, a failure) are logged as they are, like UniiChat's `unanswered`.
+    for (const open of model.unanswered?.() ?? []) { try { await call({ action: "record", lease, key: `${attempt}:tool:${open.id}`, kind: "tool", text: toolText(open.name, open.input) }); } catch { /* best effort */ } }
+    const stopped = parentSignal.reason instanceof UserStop;
+    try { await call({ action: "finish", lease, status: stopped ? "stopped" : "failed", text: error instanceof Error ? error.message : String(error) }); } catch { /* Lease takeover already records interruption; never overwrite its state. */ }
     throw error;
   } finally { clearInterval(heartbeat); parentSignal.removeEventListener("abort", parentAbort); modelController.abort(); }
 }

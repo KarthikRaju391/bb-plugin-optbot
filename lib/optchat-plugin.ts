@@ -92,7 +92,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     parentId:z.string().min(1).max(128).optional(),
     key: z.string().min(1).max(256).optional(), kind: z.enum(["user", "talk", "tool", "echo", "work", "note"]).optional(),
     text: z.string().optional(), start: z.number().int().nonnegative().optional(),
-    count: z.number().int().positive().optional(), status: z.enum(["completed", "failed"]).optional(),
+    count: z.number().int().positive().optional(), status: z.enum(["completed", "failed", "stopped"]).optional(),
   }).strict();
   bb.agents.registerTool({
     name: "optbot_chat", description: "Private OptBot runtime persistence protocol. Managed by the harness; not an agent-facing memory editing tool.",
