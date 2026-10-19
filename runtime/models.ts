@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { AgentTool, ModelBoundary, ModelEvent, ModelOptions } from "./turn";
 import { SPEC_SYSTEM, TURN_HEAD } from "./prompts";
-import { cacheBlocks as cacheView, capResult as capToolResult, type TextBlock } from "./cache";
+import { cacheBlocks as cacheView, capResult as capToolResult, singleFlight, type TextBlock } from "./cache";
 import {providerPayload} from "./response";
 import { codexModel } from "./codex";
 
@@ -10,7 +10,7 @@ type JsonObject = Record<string, unknown>;
 const objects = (value: unknown): JsonObject[] => Array.isArray(value) ? value.filter((v): v is JsonObject => Boolean(v) && typeof v === "object" && !Array.isArray(v)) : [];
 const text = (value: unknown) => typeof value === "string" ? value : "";
 const envelope = z.object({ id: z.string(), output: z.array(z.record(z.string(), z.unknown())).optional(), content: z.array(z.record(z.string(), z.unknown())).optional(), status: z.string().optional(), stop_reason: z.string().nullable().optional(), usage: z.unknown().optional() }).passthrough();
-export type ApiOptions = Pick<ModelOptions,"model"|"env"|"signal"|"onUsage"> & { system: string; tools?: AgentTool[]; onThought?:(id:string,text:string)=>void };
+export type ApiOptions = Pick<ModelOptions,"model"|"env"|"signal"|"onUsage"> & { system: string; tools?: AgentTool[]; onThought?:(id:string,text:string)=>void; /** Mark the request's end for the cache (turns); a compaction's task is never marked. */ endMark?: boolean };
 export type ApiReply = { text: string; thoughts: {id:string;text:string}[]; calls: {id:string;name:string;input:unknown}[] };
 export interface ApiConversation { ask(message?: string): Promise<ApiReply>; addUser(message: string): void; addResult(id: string, result: string, error: boolean): void; close?(): void }
 export type ApiFetch = typeof fetch;
@@ -51,18 +51,19 @@ export function apiConversation(blocks: TextBlock[], options: ApiOptions, networ
   return {addUser,addResult,async ask(message?:string) {
     options.signal.throwIfAborted(); if(message!==undefined) addUser(message);
     const request=provider==="openai"?{
-      model,store:false,stream:Boolean(options.onThought),max_output_tokens:16_384,input:history,
+      model,store:false,stream:Boolean(options.onThought)||options.endMark===false,max_output_tokens:16_384,input:history,
       tools:tools.map(tool=>({type:"function",name:tool.name,description:tool.description,parameters:tool.inputSchema,strict:false})),
       ...(reasoning?{reasoning:{effort:"medium",context:"all_turns",summary:"auto"},include:["reasoning.encrypted_content"]}:{}),
       ...(advanced?{prompt_cache_options:{mode:"implicit",ttl:"30m"}}:{}),
     }:{
-      model,stream:Boolean(options.onThought),max_tokens:16_384,system:options.system,messages:history,
+      // UniiChat Anthropic.ts: the system prompt always marked, the request's end only when its last block is.
+      model,stream:Boolean(options.onThought)||options.endMark===false,max_tokens:16_384,system:[{type:"text",text:options.system,cache_control:{type:"ephemeral"}}],messages:history,
       tools:tools.map(tool=>({name:tool.name,description:tool.description,input_schema:tool.inputSchema})),
-      cache_control:{type:"ephemeral"},
+      ...(options.endMark===false?{}:{cache_control:{type:"ephemeral"}}),
       ...(model.startsWith("claude-sonnet-4-6")||model.startsWith("claude-opus-4-")?{thinking:{type:"adaptive"},output_config:{effort:"medium"}}:{}),
     };
     const url=provider==="openai"?endpoint(options.env.OPTBOT_OPENAI_BASE_URL??"https://api.openai.com/v1/","responses"):endpoint(options.env.OPTBOT_ANTHROPIC_BASE_URL??"https://api.anthropic.com/v1/","messages");
-    const response=await network(url,{method:"POST",headers:{"content-type":"application/json",...(provider==="openai"?{authorization:`Bearer ${key}`}:{"x-api-key":key,"anthropic-version":"2023-06-01"})},body:JSON.stringify(request),signal:options.signal});
+    const response=await singleFlight(model,options.system,blocks,async begun=>{const r=await network(url,{method:"POST",headers:{"content-type":"application/json",...(provider==="openai"?{authorization:`Bearer ${key}`}:{"x-api-key":key,"anthropic-version":"2023-06-01"})},body:JSON.stringify(request),signal:options.signal});begun();return r;});
     // API errors can echo credentials. Never put their raw bodies into memory.
     if(!response.ok) { await response.body?.cancel(); throw new Error(`${provider} model request failed (HTTP ${response.status}); check credentials, model, endpoint and account limits`); }
     const payload=await providerPayload(response,provider,options.signal,options.onThought);

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { experimental_resolveExecutablePath } from "@get-bb/plugin-sdk/provider-bridge";
 import type { ApiConversation, ApiOptions } from "./models";
+import { joinBlocks } from "./cache";
 
 type Cli = "claude-code" | "pi";
 // One print-mode call normally takes seconds; a CLI that hangs (for example a version-manager wrapper
@@ -32,7 +33,7 @@ function invocation(cli: Cli, model: string | null, system: string) {
  * print-mode call per attempt. Size feedback replays the earlier candidate, since each call is fresh.
  */
 export function cliConversation(blocks: { text: string }[], options: ApiOptions): ApiConversation & { close(): void } {
-  let dialogue = blocks.map(block => block.text).join("\n\n"), last = "";
+  let dialogue = joinBlocks(blocks), last = "";
   const children = new Set<ReturnType<typeof spawn>>();
   async function run(prompt: string) {
     options.signal.throwIfAborted();

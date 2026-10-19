@@ -1,3 +1,4 @@
+import { joinBlocks } from "./cache";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
@@ -150,7 +151,7 @@ export function codexConversation(blocks: { text: string }[], options: ApiOption
   return { addUser() { throw new Error("Use ask(message) for native compactor feedback"); }, addResult() { throw new Error("Native compactor tools are disabled"); },
     close() { state?.rpc.close(); }, async ask(message) {
       state ??= await session({ ...options, tools: [] }); let text = "";
-      for await (const event of turn(state, message ?? blocks.map(block => block.text).join("\n\n"), { ...options, tools: [] })) if (event.kind === "result") text = event.text;
+      for await (const event of turn(state, message ?? joinBlocks(blocks), { ...options, tools: [] })) if (event.kind === "result") text = event.text;
       return { text, thoughts: [], calls: [] };
     } };
 }

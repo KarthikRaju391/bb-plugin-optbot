@@ -1,7 +1,7 @@
 import type { Compression, OptChat } from "./optchat";
 import { NODE_BYTES } from "./optchat";
 import { apiConversation, Refusal, type ApiOptions, type ApiConversation } from "../runtime/models";
-import { cacheBlocks, utf8Prefix } from "../runtime/cache";
+import { cacheBlocks, joinBlocks, utf8Prefix } from "../runtime/cache";
 import { SYSTEM, compactionTask, tooLong } from "../runtime/prompts";
 import { codexConversation } from "../runtime/codex";
 import { cliConversation } from "../runtime/cli-summarizer";
@@ -29,8 +29,8 @@ export function isCli(model:string) { return model.startsWith("bb/"); }
 export async function compactNode(task:Compression,options:ApiOptions,native?: (prompt:string,options:ApiOptions)=>ApiConversation) {
   const blocks=[...cacheBlocks(task.context),{text:compactionTask(task),cache:false}];
   // The same system prompt as turns, the bot's rules after it (UniiChat Tools.system: MASTER + rules).
-  const settings={...options,system:options.system?`${SYSTEM}\n\n${options.system}`:SYSTEM,tools:[]};
-  const open=(parts:typeof blocks):ApiConversation=>native?native(parts.map(block=>block.text).join("\n\n"),settings):options.model.startsWith("pool/")?poolConversation(parts,settings):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(parts,settings):options.model.startsWith("bb/")?codexConversation(parts,settings):apiConversation(parts,settings);
+  const settings={...options,system:options.system?`${SYSTEM}\n\n${options.system}`:SYSTEM,tools:[],endMark:false};
+  const open=(parts:typeof blocks):ApiConversation=>native?native(joinBlocks(parts),settings):options.model.startsWith("pool/")?poolConversation(parts,settings):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(parts,settings):options.model.startsWith("bb/")?codexConversation(parts,settings):apiConversation(parts,settings);
   const lines:string[]=[];let note:string|undefined;
   for(let n=0;n<TRIES;n++) {
     options.signal.throwIfAborted();

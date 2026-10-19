@@ -1,17 +1,41 @@
+import { createHash } from "node:crypto";
 export const CAP = 30_000;
-export const MARKS = [50_000, 80_000, 100_000] as const;
 export type TextBlock = { text: string; cache: boolean };
-/** Constant mark positions, cut only at complete line endings, not arbitrary bytes. */
+/** Lines per cache block (UniiChat Memory.BLOCK). */
+export const BLOCK = 4;
+/**
+ * UniiChat Memory.view's blocks: "<chat>\n", the view's lines in blocks of four, the rest with "</chat>\n". One mark,
+ * on the last whole block (else the opening one): the next call finds it and pays only for the lines after it.
+ */
 export function cacheBlocks(view: string): TextBlock[] {
-  const blocks: TextBlock[] = []; let start=0;
-  for (const mark of MARKS) {
-    if(mark>=view.length) continue;
-    const end=view.lastIndexOf("\n",mark)+1;
-    if(end<=start) continue;
-    blocks.push({text:view.slice(start,end),cache:true}); start=end;
-  }
-  if(start<view.length) blocks.push({text:view.slice(start),cache:false});
+  if (!view.startsWith("<chat>\n") || !view.endsWith("</chat>\n")) return [{ text: view, cache: false }];
+  const body = view.slice("<chat>\n".length, view.length - "</chat>\n".length), lines = body ? body.split(/(?<=\n)/) : [];
+  const whole = Math.floor(lines.length / BLOCK), blocks: TextBlock[] = [{ text: "<chat>\n", cache: whole === 0 }];
+  for (let k = 0; k < whole; k++) blocks.push({ text: lines.slice(k * BLOCK, (k + 1) * BLOCK).join(""), cache: k === whole - 1 });
+  blocks.push({ text: lines.slice(whole * BLOCK).join("") + "</chat>\n", cache: false });
   return blocks;
+}
+/** Blocks as one text, for transports that take a string: no separators, a newline only where a block lacks one. */
+export function joinBlocks(blocks: readonly { text: string }[]) {
+  return blocks.reduce((text, block) => text + (text && !text.endsWith("\n") ? "\n" : "") + block.text, "");
+}
+/**
+ * UniiChat AskAI.wait/lead: a call whose marked prefix another call is writing waits until that call's answer
+ * starts, so only one pays to write it and the others read it. Keyed by the model, system prompt and the blocks up
+ * to the last mark; a prefix with no mark never waits.
+ */
+const writing = new Map<string, Promise<void>>();
+export async function singleFlight<T>(model: string, system: string, blocks: readonly TextBlock[], send: (begun: () => void) => Promise<T>): Promise<T> {
+  const last = blocks.map(block => block.cache).lastIndexOf(true);
+  if (last < 0) return send(() => {});
+  const key = createHash("sha256").update(JSON.stringify([model, system, blocks.slice(0, last + 1).map(block => block.text)])).digest("hex");
+  const leader = writing.get(key);
+  if (leader) { await leader; return send(() => {}); }
+  let begin!: () => void;
+  const started = new Promise<void>(resolve => { begin = resolve; });
+  writing.set(key, started);
+  const begun = () => { begin(); if (writing.get(key) === started) writing.delete(key); };
+  try { return await send(begun); } finally { begun(); }
 }
 export function capResult(text: string, cap=CAP) {
   const chars=Array.from(text);

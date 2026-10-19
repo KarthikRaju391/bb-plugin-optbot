@@ -1,6 +1,8 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { Refusal, type ApiConversation, type ApiOptions } from "./models";
+import { joinBlocks, singleFlight } from "./cache";
+import { providerPayload } from "./response";
 
 // Opt-in, unsupported by BB: Account Pooler serves only Codex and Claude Code threads, so OptBot reads its
 // per-machine token from Account Pooler's data folder and calls its local proxy. The proxy picks and switches
@@ -41,33 +43,36 @@ export function poolConversation(blocks: { text: string }[], options: ApiOptions
   const { pool, model } = poolRef(options.model);
   const url = options.env.OPTBOT_POOL_URL, token = options.env.OPTBOT_POOL_TOKEN;
   if (!url || !token) throw new Error("Turn on OptBot's compactorAccountPooler setting to summarize through Account Pooler");
-  const prompt = blocks.map(block => block.text).join("\n\n");
-  const history: { role: "user" | "assistant"; text: string }[] = [{ role: "user", text: prompt }];
+  // The first message keeps its blocks, so the view's last whole block carries the cache mark (UniiChat Memory.view).
+  const first = blocks.map(block => ({ text: block.text, cache: (block as { cache?: boolean }).cache === true }));
+  const history: { role: "user" | "assistant"; text: string }[] = [{ role: "user", text: joinBlocks(blocks) }];
   async function send() {
     const signal = AbortSignal.any([options.signal, AbortSignal.timeout(POOL_CALL_TIMEOUT_MS)]);
     const body = pool === "claude"
-      ? { model, max_tokens: 2_048, system: options.system, messages: history.map(m => ({ role: m.role, content: [{ type: "text", text: m.text }] })) }
+      ? { model, max_tokens: 2_048, stream: true, system: [{ type: "text", text: options.system, cache_control: { type: "ephemeral" } }],
+          messages: history.map((m, k) => ({ role: m.role, content: k === 0 ? first.map(block => ({ type: "text", text: block.text, ...(block.cache ? { cache_control: { type: "ephemeral" } } : {}) })) : [{ type: "text", text: m.text }] })) }
       // The Codex backend only streams and takes the system prompt as instructions.
       : { model, instructions: options.system, stream: true, store: false, reasoning: { effort: "medium" },
           input: history.map(m => m.role === "user" ? { role: "user", content: [{ type: "input_text", text: m.text }] } : { role: "assistant", content: [{ type: "output_text", text: m.text }] }) };
     let response: Response;
     try {
-      response = await network(`${url}/${pool === "claude" ? "messages" : "responses"}`, { method: "POST", signal, body: JSON.stringify(body),
-        headers: { "content-type": "application/json", "x-bb-account-pool-token": token!, ...(pool === "claude" ? { "anthropic-version": "2023-06-01" } : {}) } });
+      response = await singleFlight(options.model, options.system, first, async begun => { const r = await network(`${url}/${pool === "claude" ? "messages" : "responses"}`, { method: "POST", signal, body: JSON.stringify(body),
+        headers: { "content-type": "application/json", "x-bb-account-pool-token": token!, ...(pool === "claude" ? { "anthropic-version": "2023-06-01" } : {}) } }); begun(); return r; });
     } catch (error) {
       if (options.signal.aborted) throw new Error("Summary cancelled");
       if (signal.aborted) throw new Error(`${options.model} summary timed out after ${POOL_CALL_TIMEOUT_MS / 1000} s in Account Pooler`);
       throw new Error(`Could not reach Account Pooler: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const raw = await response.text();
-    if (!response.ok) throw new Error(`${options.model} summary failed in Account Pooler (HTTP ${response.status})${reason(raw)}${response.status === 401 ? "; its machine token may have rotated, the next try rereads it" : ""}`);
+    if (!response.ok) { const raw = await response.text(); throw new Error(`${options.model} summary failed in Account Pooler (HTTP ${response.status})${reason(raw)}${response.status === 401 ? "; its machine token may have rotated, the next try rereads it" : ""}`); }
     if (pool === "claude") {
-      const parsed = JSON.parse(raw) as { content?: { type?: string; text?: string }[]; stop_reason?: string };
+      // Streamed, so a call sharing this prefix waits only until this answer starts (UniiChat AskAI.wait).
+      const parsed = (await providerPayload(response, "anthropic", signal)).body as { content?: { type?: string; text?: string }[]; stop_reason?: string };
       if (parsed.stop_reason === "refusal") throw new Refusal(`${options.model} declined to summarize`);
       if (parsed.stop_reason !== "end_turn" && parsed.stop_reason !== "stop_sequence") throw new Error(`${options.model} summary stopped with ${parsed.stop_reason ?? "no completion status"}`);
       return (parsed.content ?? []).filter(part => part.type === "text").map(part => part.text ?? "").join("").trim();
     }
     // Server-sent events: the final response.completed event carries the whole output.
+    const raw = await response.text();
     for (const line of raw.split("\n")) {
       if (!line.startsWith("data:") || !line.includes("\"response.completed\"")) continue;
       const done = JSON.parse(line.slice(5)) as { response?: { output?: { type?: string; content?: { type?: string; text?: string }[] }[] } };
