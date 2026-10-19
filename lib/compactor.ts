@@ -1,6 +1,6 @@
 import type { Compression, OptChat } from "./optchat";
 import { NODE_BYTES } from "./optchat";
-import { apiConversation, type ApiOptions, type ApiConversation } from "../runtime/models";
+import { apiConversation, Refusal, type ApiOptions, type ApiConversation } from "../runtime/models";
 import { cacheBlocks, utf8Prefix } from "../runtime/cache";
 import { SYSTEM, compactionTask, tooLong } from "../runtime/prompts";
 import { codexConversation } from "../runtime/codex";
@@ -9,22 +9,36 @@ import { poolConversation } from "../runtime/pool-summarizer";
 export const JOBS=8, TRIES=5, RETRY_MS=10_000;
 export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void; compact?:(task:Compression,options:ApiOptions)=>Promise<string>};
 
+/** A text with its newlines and the whitespace around them as single spaces (UniiChat Memory.flat). */
+export function flat(text:string) { return text.includes("\n")?text.replace(/\s*\n\s*/g," "):text; }
+/** A node's source clipped to 512 bytes: the node of a message or pair the model gives no line for. */
+export function clippedSource(task:Pick<Compression,"source"|"children">) { return utf8Prefix(flat(task.children?task.children.map(flat).join("\n"):task.source),NODE_BYTES); }
+
+/**
+ * One node's summary (UniiChat Memory.build): [system prompt] [<chat> compaction view </chat>] [task], asked
+ * until a line fits, TRIES lines at most, the shortest kept. Each try is a fresh call with those blocks; one after
+ * a line too long adds only a note with its size and where the limit cuts it, never an earlier try's words. No
+ * line (a refusal or an empty answer: the input's doing) gives the source clipped; an error after a line keeps it.
+ */
 export async function compactNode(task:Compression,options:ApiOptions,native?: (prompt:string,options:ApiOptions)=>ApiConversation) {
-  // §4: [system prompt] [<chat> compaction view </chat>] [task], the same system prompt as turns.
   const blocks=[...cacheBlocks(task.context),{text:compactionTask(task),cache:false}];
-  const conversation=native?native(blocks.map(block=>block.text).join("\n\n"),{...options,system:SYSTEM,tools:[]}):options.model.startsWith("pool/")?poolConversation(blocks,{...options,system:SYSTEM,tools:[]}):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(blocks,{...options,system:SYSTEM,tools:[]}):options.model.startsWith("bb/")?codexConversation(blocks,{...options,system:SYSTEM,tools:[]}):apiConversation(blocks,{...options,system:SYSTEM,tools:[]});
-  try {
-  const candidates:string[]=[];let feedback:string|undefined;
+  const settings={...options,system:SYSTEM,tools:[]};
+  const open=(parts:typeof blocks):ApiConversation=>native?native(parts.map(block=>block.text).join("\n\n"),settings):options.model.startsWith("pool/")?poolConversation(parts,settings):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(parts,settings):options.model.startsWith("bb/")?codexConversation(parts,settings):apiConversation(parts,settings);
+  const lines:string[]=[];let note:string|undefined;
   for(let n=0;n<TRIES;n++) {
     options.signal.throwIfAborted();
-    const reply=await conversation.ask(feedback), line=reply.text.trim();
-    if(!line) throw new Error("Compactor returned an empty line");
-    candidates.push(line); const size=Buffer.byteLength(line);
+    const conversation=open(note?[...blocks,{text:note,cache:false}]:blocks);
+    let line:string;
+    try { line=(await conversation.ask()).text.trim(); }
+    catch(error) { if(error instanceof Refusal||lines.length)break; throw error; }
+    finally { conversation.close?.(); }
+    if(!line) break;
+    lines.push(line); const size=Buffer.byteLength(line);
     if(size<=NODE_BYTES) break;
-    feedback=tooLong(size,utf8Prefix(line,NODE_BYTES));
+    note=tooLong(size,utf8Prefix(line,NODE_BYTES));
   }
-  return candidates.reduce((best,line)=>Buffer.byteLength(line)<Buffer.byteLength(best)?line:best);
-  } finally { conversation.close?.(); }
+  if(!lines.length) return clippedSource(task);
+  return lines.reduce((best,line)=>Buffer.byteLength(line)<Buffer.byteLength(best)?line:best);
 }
 function createCompactor(initial:CompactorConfig) {
   let config=initial,closed=false;

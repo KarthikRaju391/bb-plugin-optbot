@@ -65,16 +65,11 @@ export async function runOptChatTurn(args: {
       }
       const task = await call({ action: "work", lease }) as Compression | null;
       if (!task) return;
-      const summary = await compactNode(task, { model: args.compactorModel ?? "bb/codex", env: options.env, signal: options.signal, system: "" }, (prompt, config) => {
-        let dialogue = prompt;
-        return { async ask(feedback) {
-          check();
-          if (feedback) dialogue += `\n\nUser feedback:\n${feedback}`;
-          const text = await model.summarize(dialogue, { ...options, model: config.model, instructions: config.system });
-          dialogue += `\n\nAssistant candidate:\n${text}`;
-          return { text, thoughts: [], calls: [] };
-        }, addUser() {}, addResult() {} };
-      });
+      // Each try is its own call (compactNode builds its blocks, a "Too long" note included).
+      const summary = await compactNode(task, { model: args.compactorModel ?? "bb/codex", env: options.env, signal: options.signal, system: "" }, (prompt, config) => ({
+        async ask() { check(); return { text: await model.summarize(prompt, { ...options, model: config.model, instructions: config.system }), thoughts: [], calls: [] }; },
+        addUser() {}, addResult() {},
+      }));
       await call({ action: "merge", lease, start: task.start, count: task.count, text: summary });
     }
   }

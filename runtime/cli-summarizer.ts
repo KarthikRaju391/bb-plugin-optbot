@@ -57,7 +57,7 @@ export function cliConversation(blocks: { text: string }[], options: ApiOptions)
       child.stderr.on("data", chunk => { err = (err + chunk).slice(-4000); });
       child.on("error", () => finish(new Error(`Could not launch ${executable} on this machine`)));
       child.on("close", code => {
-        if (code === 0 && out.trim()) finish(null, out.trim());
+        if (code === 0) finish(null, out.trim()); // an empty answer is no line: the caller clips the source
         else finish(new Error(`${options.model} summary failed (exit ${code})${reason(err)}; check that ${executable} is signed in on the compactor machine and within its usage limits`));
       });
       child.stdin.on("error", () => {});

@@ -15,6 +15,8 @@ export type ApiReply = { text: string; thoughts: {id:string;text:string}[]; call
 export interface ApiConversation { ask(message?: string): Promise<ApiReply>; addUser(message: string): void; addResult(id: string, result: string, error: boolean): void; close?(): void }
 export type ApiFetch = typeof fetch;
 
+/** The model declined: the input's doing, so retrying cannot help (a summary then keeps its source clipped). */
+export class Refusal extends Error {}
 export function modelRef(value: string):{provider:"openai"|"anthropic";model:string} {
   const aliases:Record<string,string>={sonnet:"anthropic/claude-sonnet-4-6",opus:"anthropic/claude-opus-4-6",haiku:"anthropic/claude-haiku-4-5"};
   const selected=aliases[value]??value, slash=selected.indexOf("/");
@@ -66,6 +68,8 @@ export function apiConversation(blocks: TextBlock[], options: ApiOptions, networ
     const payload=await providerPayload(response,provider,options.signal,options.onThought);
     const decoded=envelope.safeParse(payload.body);if(!decoded.success)throw new Error("Invalid model response envelope; no partial entry is executed or logged");
     const body=decoded.data; options.signal.throwIfAborted(); options.onUsage?.(body.usage);
+    if(provider==="openai"&&body.status==="incomplete"&&JSON.stringify(body).includes("content_filter")) throw new Refusal("OpenAI declined the request");
+    if(provider==="anthropic"&&body.stop_reason==="refusal") throw new Refusal("Anthropic declined the request");
     if(provider==="openai"&&body.status!=="completed") throw new Error(`OpenAI response is ${body.status??"missing its completion status"}; no partial entry is executed or logged`);
     if(provider==="anthropic" && !["end_turn","tool_use","stop_sequence"].includes(body.stop_reason??"")) throw new Error(`Anthropic response stopped with ${body.stop_reason??"no completion status"}; no partial entry is executed or logged`);
     const items=provider==="openai"?body.output:body.content;
@@ -77,7 +81,8 @@ export function apiConversation(blocks: TextBlock[], options: ApiOptions, networ
     const reply:ApiReply={text:"",thoughts:[],calls:[]};
     for(const [index,item] of items.entries()) {
       if(provider==="openai") {
-        if(item.type==="message") reply.text+=objects(item.content).map(part=>text(part.text)||text(part.refusal)).join("\n");
+        if(item.type==="message"&&objects(item.content).some(part=>part.type==="refusal"||text(part.refusal))) throw new Refusal("OpenAI declined the request");
+        if(item.type==="message") reply.text+=objects(item.content).map(part=>text(part.text)).join("\n");
         if(item.type==="reasoning"&&!payload.shown.has(text(item.id))) reply.thoughts.push({id:text(item.id),text:objects(item.summary).map(part=>text(part.text)).join("\n")});
         if(item.type==="function_call") {
           let input:unknown; try {input=JSON.parse(text(item.arguments));} catch { input=item.arguments; }

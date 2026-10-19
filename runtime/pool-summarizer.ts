@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { ApiConversation, ApiOptions } from "./models";
+import { Refusal, type ApiConversation, type ApiOptions } from "./models";
 
 // Opt-in, unsupported by BB: Account Pooler serves only Codex and Claude Code threads, so OptBot reads its
 // per-machine token from Account Pooler's data folder and calls its local proxy. The proxy picks and switches
@@ -63,6 +63,7 @@ export function poolConversation(blocks: { text: string }[], options: ApiOptions
     if (!response.ok) throw new Error(`${options.model} summary failed in Account Pooler (HTTP ${response.status})${reason(raw)}${response.status === 401 ? "; its machine token may have rotated, the next try rereads it" : ""}`);
     if (pool === "claude") {
       const parsed = JSON.parse(raw) as { content?: { type?: string; text?: string }[]; stop_reason?: string };
+      if (parsed.stop_reason === "refusal") throw new Refusal(`${options.model} declined to summarize`);
       if (parsed.stop_reason !== "end_turn" && parsed.stop_reason !== "stop_sequence") throw new Error(`${options.model} summary stopped with ${parsed.stop_reason ?? "no completion status"}`);
       return (parsed.content ?? []).filter(part => part.type === "text").map(part => part.text ?? "").join("").trim();
     }
@@ -81,7 +82,6 @@ export function poolConversation(blocks: { text: string }[], options: ApiOptions
       options.signal.throwIfAborted();
       if (feedback) history.push({ role: "user", text: feedback });
       const text = await send();
-      if (!text) throw new Error(`${options.model} returned an empty summary`);
       history.push({ role: "assistant", text });
       return { text, thoughts: [], calls: [] };
     },
