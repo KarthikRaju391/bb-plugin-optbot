@@ -3,7 +3,7 @@ import { compactNode } from "../lib/compactor";
 import type { Compression } from "../lib/optchat";
 
 /** The host side of the compact call: the summarizer CLI runs with the daemon's environment, or the configured binary. */
-export function compactOnHost({ task, model, executable, poolToken }: { task: Compression; model: string; executable?: string; poolToken?: string }, signal: AbortSignal, base: NodeJS.ProcessEnv = process.env) {
+export function compactOnHost({ task, model, executable, poolToken, rules }: { task: Compression; model: string; executable?: string; poolToken?: string; rules?: string }, signal: AbortSignal, base: NodeJS.ProcessEnv = process.env) {
   const env = sanitizeInheritedChildProcessEnv({ env: base });
   // Account Pooler, set up the way BB sets up a Claude Code thread: the real Claude Code CLI, pointed at
   // the pool's proxy on this machine's BB server, which picks and switches accounts per request.
@@ -15,5 +15,5 @@ export function compactOnHost({ task, model, executable, poolToken }: { task: Co
     env.ANTHROPIC_AUTH_TOKEN = poolToken;
   }
   if (executable) env[/^bb\/claude-code/.test(model) ? "OPTBOT_CLAUDE_EXECUTABLE" : /^bb\/pi/.test(model) ? "OPTBOT_PI_EXECUTABLE" : "OPTBOT_CODEX_EXECUTABLE"] = executable;
-  return compactNode(task, { model, system: "", env, signal });
+  return compactNode(task, { model, system: rules ?? "", env, signal });
 }

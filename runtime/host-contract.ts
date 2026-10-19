@@ -6,7 +6,7 @@ export const modelHostContract = defineRpcContract({
     input: z.object({ model: z.string().regex(/^bb\/(?:codex(?:\/[^\s/]+)?|claude-code(?:\/[^\s/]+)?|pi(?:\/[^\s]+)?)$/), task: z.object({
       start: z.number().int().nonnegative(), count: z.number().int().positive(),
       source: z.string(), context: z.string(), children: z.array(z.string()).optional(),
-    }).strict(), executable: z.string().regex(/^\/\S/).optional(), poolToken: z.string().min(16).optional() }).strict(),
+    }).strict(), executable: z.string().regex(/^\/\S/).optional(), poolToken: z.string().min(16).optional(), rules: z.string().max(16_000).optional() }).strict(),
     output: z.string().min(1),
   },
 });

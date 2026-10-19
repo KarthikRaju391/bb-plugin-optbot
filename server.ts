@@ -222,7 +222,8 @@ export default async function plugin(bb: BbPluginApi) {
     });
   }
   const contextOwner = (ctx: PluginAgentConfigurationContext) => owner(ctx.thread);
-  const optchat=await registerOptChat(bb, resolveOwner, workers);
+  // A bot's rules follow the system prompt in its summaries too, as in its turns (UniiChat Tools.system).
+  const optchat=await registerOptChat(bb, resolveOwner, workers, bot => { const value = store.get(bot); return value ? botInstructions(value) : undefined; });
   workers.setLiveTurnProbe(threadId => optchat.liveTurn(threadId));
   bb.agents.configure((ctx) => {
     const worker = workers.configuration(ctx);

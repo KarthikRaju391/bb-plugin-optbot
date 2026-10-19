@@ -11,7 +11,7 @@ import { poolConversation } from "../runtime/pool-summarizer";
  * process per call (claude, codex, pi), so those share 8 across all bots to keep the machine responsive.
  */
 export const JOBS=64, CLI_JOBS=8, TRIES=5, RETRY_MS=10_000;
-export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void; compact?:(task:Compression,options:ApiOptions)=>Promise<string>};
+export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void; compact?:(task:Compression,options:ApiOptions)=>Promise<string>; rules?:(bot:string)=>string|undefined};
 
 /** A text with its newlines and the whitespace around them as single spaces (UniiChat Memory.flat). */
 export function flat(text:string) { return text.includes("\n")?text.replace(/\s*\n\s*/g," "):text; }
@@ -28,7 +28,8 @@ export function clippedSource(task:Pick<Compression,"source"|"children">) { retu
 export function isCli(model:string) { return model.startsWith("bb/"); }
 export async function compactNode(task:Compression,options:ApiOptions,native?: (prompt:string,options:ApiOptions)=>ApiConversation) {
   const blocks=[...cacheBlocks(task.context),{text:compactionTask(task),cache:false}];
-  const settings={...options,system:SYSTEM,tools:[]};
+  // The same system prompt as turns, the bot's rules after it (UniiChat Tools.system: MASTER + rules).
+  const settings={...options,system:options.system?`${SYSTEM}\n\n${options.system}`:SYSTEM,tools:[]};
   const open=(parts:typeof blocks):ApiConversation=>native?native(parts.map(block=>block.text).join("\n\n"),settings):options.model.startsWith("pool/")?poolConversation(parts,settings):/^bb\/(claude-code|pi)(\/|$)/.test(options.model)?cliConversation(parts,settings):options.model.startsWith("bb/")?codexConversation(parts,settings):apiConversation(parts,settings);
   const lines:string[]=[];let note:string|undefined;
   for(let n=0;n<TRIES;n++) {
@@ -77,7 +78,7 @@ function createCompactor(initial:CompactorConfig) {
       }
       for(const task of tasks) {
         const key=`${bot}:${task.start}:${task.count}`;let failed=false;
-        const work=Promise.resolve().then(async()=>{const options=await config.options(controller.signal);cli=isCli(options.model);return (config.compact??compactNode)(task,options);}).then(line=>{
+        const work=Promise.resolve().then(async()=>{const options={...await config.options(controller.signal),system:config.rules?.(bot)??""};cli=isCli(options.model);return (config.compact??compactNode)(task,options);}).then(line=>{
           if(!closed) config.chat.accept(bot,task,line); failures.delete(key); problems.delete(bot);
         }).catch(error=>{
           if(closed) return;failed=true;

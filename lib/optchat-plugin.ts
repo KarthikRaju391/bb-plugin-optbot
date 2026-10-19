@@ -15,7 +15,7 @@ const SUMMARY_CALL_TIMEOUT_MS = 300_000;
 const summarizerRef = (model: string) => /^bb\/(claude-code|pi)(\/|$)/.test(model) ? cliRef(model) : codexRef(model);
 import type { createBbWorkers } from "./bb-workers";
 
-export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>) {
+export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined) {
   const db = bb.storage.database();
   const root=join(dirname(db.name),"chat");
   const archive = await openArchive(root, message=>bb.log.warn(message));
@@ -48,11 +48,11 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     if (pooled===true && /^bb\/claude-code(\/|$)/.test(model)) extra.poolToken=(await poolCredentials(bb.server.experimental_dataDir,bb.server.loopbackBaseUrl,typeof host==="string"&&host?host:undefined)).OPTBOT_POOL_TOKEN;
     return extra;
   }
-  const worker=await acquireCompactor(root,{chat,report:message=>bb.log.warn(message),async compact(task,options){
+  const worker=await acquireCompactor(root,{chat,rules,report:message=>bb.log.warn(message),async compact(task,options){
     if (!options.model.startsWith("bb/")) return compactNode(task, options);
     summarizerRef(options.model);
     // One summary can take several model attempts; BB's default 30 s host-call deadline cut them off.
-    return modelHost.call("compact",{task,model:options.model,...await executable(options.model)},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
+    return modelHost.call("compact",{task,model:options.model,...(options.system?{rules:options.system}:{}),...await executable(options.model)},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
   },async options(signal){
     const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base}=await settings.get();
     const model=typeof selected==="string"&&selected?selected:"bb/codex";
