@@ -101,6 +101,9 @@ export const SYSTEM = SPEC_SYSTEM
   .replace("zoom(id, 1) gives", 'optbot_memory({action: "zoom", start: id, count: 1}) gives')
   .replace("date(id) gives", 'optbot_memory({action: "date", start: id}) gives');
 
+/** What follows the view in a turn, before the message whole (UniiChat Server.ts). */
+export const TURN_HEAD = "Turn: the user's new message:\n\n";
+
 const RULER = "-".repeat(512);
 /** §4, verbatim: the task after the compaction's view. */
 export function compactionTask(task: { start: number; count: number; source: string; children?: string[] }) {

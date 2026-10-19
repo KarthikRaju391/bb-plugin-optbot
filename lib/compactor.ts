@@ -6,7 +6,11 @@ import { SYSTEM, compactionTask, tooLong } from "../runtime/prompts";
 import { codexConversation } from "../runtime/codex";
 import { cliConversation } from "../runtime/cli-summarizer";
 import { poolConversation } from "../runtime/pool-summarizer";
-export const JOBS=8, TRIES=5, RETRY_MS=10_000;
+/**
+ * Summaries at once. UniiChat runs 64 per chat (Memory.JOBS), as cheap HTTP calls; a CLI summarizer starts a whole
+ * process per call (claude, codex, pi), so those share 8 across all bots to keep the machine responsive.
+ */
+export const JOBS=64, CLI_JOBS=8, TRIES=5, RETRY_MS=10_000;
 export type CompactorConfig={chat:OptChat; options:(signal:AbortSignal)=>Promise<ApiOptions>; report:(message:string)=>void; compact?:(task:Compression,options:ApiOptions)=>Promise<string>};
 
 /** A text with its newlines and the whitespace around them as single spaces (UniiChat Memory.flat). */
@@ -20,6 +24,8 @@ export function clippedSource(task:Pick<Compression,"source"|"children">) { retu
  * a line too long adds only a note with its size and where the limit cuts it, never an earlier try's words. No
  * line (a refusal or an empty answer: the input's doing) gives the source clipped; an error after a line keeps it.
  */
+/** Whether a compactor model runs a CLI process per call (bb/claude-code, bb/pi, bb/codex) rather than an HTTP request. */
+export function isCli(model:string) { return model.startsWith("bb/"); }
 export async function compactNode(task:Compression,options:ApiOptions,native?: (prompt:string,options:ApiOptions)=>ApiConversation) {
   const blocks=[...cacheBlocks(task.context),{text:compactionTask(task),cache:false}];
   const settings={...options,system:SYSTEM,tools:[]};
@@ -46,19 +52,23 @@ function createCompactor(initial:CompactorConfig) {
   const active=new Map<string,{bot:string;task:Compression;work:Promise<void>}>(), retry=new Map<string,NodeJS.Timeout>();
   // Per bot: since when summaries have failed with no success in between (cleared on the next success).
   const problems=new Map<string,{message:string;since:number}>();
+  // The summarizer's transport, learned from its settings at each call (a CLI until the first one says otherwise).
+  let cli=true;
   const monitor=setInterval(()=>{for(const bot of known)pump(bot);},1000);monitor.unref();
   function pump(bot:string) {
     known.add(bot); if(closed||queued.has(bot)) return;
     queued.add(bot);
     queueMicrotask(()=>{
-      queued.delete(bot); if(closed||active.size>=JOBS) return;
+      queued.delete(bot);
+      const cap=cli?CLI_JOBS-active.size:JOBS-[...active.values()].filter(job=>job.bot===bot).length;
+      if(closed||cap<=0) return;
       // This runs outside any request: an error thrown here would be uncaught and take down BB's whole server.
       // Report it and let waiting turns end with it instead; the monitor tries again in a second.
       let tasks:ReturnType<OptChat["available"]>;
       try {
         config.chat.hydrate(bot);config.chat.recoverQueued(bot);
         const busy=new Set([...active.values()].filter(job=>job.bot===bot).map(job=>`${job.task.start}+${job.task.count}`));
-        tasks=config.chat.available(bot,busy,JOBS-active.size);
+        tasks=config.chat.available(bot,busy,cap);
       } catch(error) {
         const message=error instanceof Error?error.message:String(error);
         if(problems.get(bot)?.message!==message)config.report(`Memory of ${bot} could not be prepared: ${message}`);
@@ -67,7 +77,7 @@ function createCompactor(initial:CompactorConfig) {
       }
       for(const task of tasks) {
         const key=`${bot}:${task.start}:${task.count}`;let failed=false;
-        const work=Promise.resolve().then(async()=>(config.compact??compactNode)(task,await config.options(controller.signal))).then(line=>{
+        const work=Promise.resolve().then(async()=>{const options=await config.options(controller.signal);cli=isCli(options.model);return (config.compact??compactNode)(task,options);}).then(line=>{
           if(!closed) config.chat.accept(bot,task,line); failures.delete(key); problems.delete(bot);
         }).catch(error=>{
           if(closed) return;failed=true;

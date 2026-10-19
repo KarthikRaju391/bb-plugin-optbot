@@ -1,12 +1,16 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Archive, Receipt, TreeLine, MainLine } from "./archive";
-import { appendCompactionLine, appendLine, tiles, VIEW_HIGH } from "./view";
+import { CVIEW_HIGH, fitBox, tiles, VIEW_HIGH, type Box } from "./view";
 
 export const NODE_BYTES = 512;
 export const VIEW_BYTES = VIEW_HIGH;
 const LEASE_MS = 60_000;
 export type MemoryKind = "user" | "talk" | "tool" | "echo" | "work" | "note";
+/** A line as views show it: newlines and the whitespace around them as one space (UniiChat Memory.flat). */
+export function flatLine(text: string) { return text.includes("\n") ? text.replace(/\s*\n\s*/g, " ") : text; }
+/** A merge's source: its halves as lines, one per line (UniiChat Memory.source). */
+export function mergeSource(a: string, b: string) { return `${flatLine(a)}\n${flatLine(b)}`; }
 /** A page: command output is clipped to this many characters; any longer text is logged over several messages (§1). */
 export const MESSAGE_CHARS = 30_000;
 /**
@@ -78,22 +82,28 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   const viewColumns = (db.pragma("table_info(optchat_view)") as { name: string }[]).map(column => column.name);
   if (!viewColumns.includes("draining")) db.exec("ALTER TABLE optchat_view ADD COLUMN draining INTEGER NOT NULL DEFAULT 0");
   if (!viewColumns.includes("cparts")) db.exec("ALTER TABLE optchat_view ADD COLUMN cparts TEXT");
-  // The sawtooth: the view grows to `budget` bytes, then one batch merges it down to half (§3.2).
-  const low = Math.floor(budget / 2);
+  if (!viewColumns.includes("seen_batch")) db.exec("ALTER TABLE optchat_view ADD COLUMN seen_batch INTEGER NOT NULL DEFAULT 0");
+  /** How many unbuilt messages ahead a compaction may start (UniiChat Memory.JOBS: its window, by message). */
+  const WINDOW = 64;
   const count = (bot: string) => (db.prepare("SELECT COUNT(*) AS n FROM optchat_log WHERE bot_id=?").get(bot) as { n: number }).n;
   const entry = (bot: string, idx: number) => db.prepare("SELECT idx,kind,text,date,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND idx=?").get(bot, idx) as Entry | undefined;
   const node = (bot: string, part: Part) => (db.prepare("SELECT text FROM optchat_nodes WHERE bot_id=? AND start=? AND count=?").get(bot, part.start, part.count) as { text: string } | undefined)?.text;
   const parts = (bot: string): Part[] => JSON.parse((db.prepare("SELECT parts FROM optchat_view WHERE bot_id=?").get(bot) as { parts: string } | undefined)?.parts ?? "[]");
-  type ViewState = { view: Part[]; draining: boolean; cview: Part[] | null };
+  // The chat's view (turns) and the compactions' view (`seen`), each with its batch flag (UniiChat view.json).
+  type ViewState = { view: Box; seen: Box };
   function viewState(bot: string): ViewState {
-    const row = db.prepare("SELECT parts,draining,cparts FROM optchat_view WHERE bot_id=?").get(bot) as { parts: string; draining: number; cparts: string | null } | undefined;
-    return { view: JSON.parse(row?.parts ?? "[]"), draining: row?.draining === 1, cview: row?.cparts ? JSON.parse(row.cparts) : null };
+    const row = db.prepare("SELECT parts,draining,cparts,seen_batch FROM optchat_view WHERE bot_id=?").get(bot) as { parts: string; draining: number; cparts: string | null; seen_batch: number } | undefined;
+    const view = { parts: JSON.parse(row?.parts ?? "[]") as Part[], batch: row?.draining === 1 };
+    // An older OptBot kept no compactions' view: it opens as the chat's, as UniiChat opens `seen` from `saved`.
+    const seen = row?.cparts ? { parts: JSON.parse(row.cparts) as Part[], batch: row.seen_batch === 1 } : { parts: view.parts.map(part => ({ ...part })), batch: false };
+    return { view, seen };
   }
-  // Saved on every change, to data.db and to the chat's view.json; loaded at start, never rebuilt (§3.2).
+  // Saved when it changes, to data.db and to the chat's view.json; loaded at start, never rebuilt (§3.2).
   function saveState(bot: string, state: ViewState) {
-    db.prepare("INSERT INTO optchat_view(bot_id,parts,draining,cparts) VALUES (?,?,?,?) ON CONFLICT(bot_id) DO UPDATE SET parts=excluded.parts,draining=excluded.draining,cparts=excluded.cparts")
-      .run(bot, JSON.stringify(state.view), state.draining ? 1 : 0, state.cview ? JSON.stringify(state.cview) : null);
-    options.archive?.saveView(bot, state.view.map(part => [Math.log2(part.count), part.start / part.count]));
+    db.prepare("INSERT INTO optchat_view(bot_id,parts,draining,cparts,seen_batch) VALUES (?,?,?,?,?) ON CONFLICT(bot_id) DO UPDATE SET parts=excluded.parts,draining=excluded.draining,cparts=excluded.cparts,seen_batch=excluded.seen_batch")
+      .run(bot, JSON.stringify(state.view.parts), state.view.batch ? 1 : 0, JSON.stringify(state.seen.parts), state.seen.batch ? 1 : 0);
+    const pairs = (parts: Part[]) => parts.map(part => [Math.log2(part.count), part.start / part.count] as [number, number]);
+    options.archive?.saveView(bot, { parts: pairs(state.view.parts), batch: state.view.batch, seen: { parts: pairs(state.seen.parts), batch: state.seen.batch } });
   }
   // Built nodes never change, so their sizes are cached; only unbuilt lines (a few recent ones) hit the DB.
   const known = new Map<string, Map<string, number>>();
@@ -106,18 +116,27 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     sizes.set(key, bytes(text)); return bytes(text);
   }
   const built = (bot: string) => (part: Part) => nodeBytes(bot, part) !== undefined;
-  const sized = (bot: string) => (part: Part) => nodeBytes(bot, part) ?? PLACEHOLDER_BYTES;
-  // Within one transaction that adds no summaries, unbuilt lines stay unbuilt: memoize them too.
-  function frozen(bot: string) {
-    const unbuilt = new Set<string>();
-    const has = (part: Part) => { if (unbuilt.has(label(part))) return false; if (nodeBytes(bot, part) !== undefined) return true; unbuilt.add(label(part)); return false; };
-    return { size: (part: Part) => has(part) ? nodeBytes(bot, part)! : PLACEHOLDER_BYTES, isBuilt: has };
+  /** A line's bytes as calls get it: none until built (UniiChat Memory.size). */
+  const sized = (bot: string) => (part: Part) => nodeBytes(bot, part) ?? 0;
+  /**
+   * UniiChat Memory.fit: the chat's view to the last message and the compactions' view to the first message not
+   * built, each batching past its high mark. `next`: a new message (a stopped batch goes on); else after builds.
+   */
+  function refit(bot: string, next: boolean) {
+    const state = viewState(bot), total = count(bot), first = queue(bot).leaves[0] ?? total;
+    const a = fitBox(state.view, total, budget, sized(bot), built(bot), next);
+    const b = fitBox(state.seen, Math.min(total, first), CVIEW_HIGH, sized(bot), built(bot), next);
+    if (a || b) saveState(bot, state);
   }
-  /** A new message appends its line to the view and to the compactions' view (§3.2, §4). */
-  function appendToState(bot: string, state: ViewState, index: number, size: (part: Part) => number, isBuilt: (part: Part) => boolean) {
-    const result = appendLine(state.view, index, size, isBuilt, state.draining, budget, low);
-    state.draining = result.draining;
-    state.cview = appendCompactionLine(state.cview, state.view, index, size, isBuilt, result.merged > 0);
+  /** The largest built nodes covering [0, total): a view kept from the tree when none was saved (UniiChat open). */
+  function tileBuilt(bot: string, total: number) {
+    const parts: Part[] = [];
+    for (let start = 0; start < total;) {
+      let size = 1;
+      while (start % (size * 2) === 0 && start + size * 2 <= total && nodeBytes(bot, { start, count: size * 2 }) !== undefined) size *= 2;
+      parts.push({ start, count: size }); start += size;
+    }
+    return parts;
   }
   // Ready work in queues, never a tree scan (§4): unbuilt leaves in order, and merges whose halves are built.
   const queues = new Map<string, { leaves: number[]; merges: Map<string, Part> }>();
@@ -132,8 +151,6 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const other = parent.start === start ? start + size : parent.start;
       if (parent.start + parent.count <= total && !done.has(label(parent)) && done.has(`${other}+${size}`)) q.merges.set(label(parent), parent);
     }
-    for (const leaf of [...q.leaves]) { const raw = entry(bot, leaf)!, source = `${raw.kind}: ${raw.text}`; if (bytes(source) <= NODE_BYTES) saveNode(bot, leaf, 1, source); }
-    for (const part of [...q.merges.values()]) if (node(bot, part) === undefined) { const a = node(bot, { start: part.start, count: part.count / 2 })!, b = node(bot, { start: part.start + part.count / 2, count: part.count / 2 })!; if (bytes(`${a}\n${b}`) <= NODE_BYTES) saveNode(bot, part.start, part.count, `${a}\n${b}`); }
     return q;
   }
   const loaded = new Set<string>();
@@ -142,13 +159,11 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,size,text);
     const q = queues.get(bot), part = { start, count: size };
     if (q) { if (size === 1) { const at = q.leaves.indexOf(start); if (at >= 0) q.leaves.splice(at, 1); } q.merges.delete(label(part)); }
-    // Its parent is ready once both halves are built; two lines that fit together are their own node (§2).
+    // Its parent is ready once both halves are built (UniiChat Memory.store).
     const parent = { start: start - start % (2 * size), count: 2 * size };
-    if (entry(bot, parent.start + parent.count - 1) === undefined || node(bot, parent) !== undefined) return;
-    const a = node(bot, { start: parent.start, count: size }), b = node(bot, { start: parent.start + size, count: size });
-    if (a === undefined || b === undefined) return;
-    if (bytes(`${a}\n${b}`) <= NODE_BYTES) saveNode(bot, parent.start, parent.count, `${a}\n${b}`);
-    else q?.merges.set(label(parent), parent);
+    if (!q || entry(bot, parent.start + parent.count - 1) === undefined || node(bot, parent) !== undefined) return;
+    const other = { start: parent.start === start ? start + size : parent.start, count: size };
+    if (node(bot, other) !== undefined) q.merges.set(label(parent), parent);
   }
   // One transaction: importing a cold cache row by row would fsync every insert.
   function hydrate(bot: string) { db.transaction(() => hydrateNow(bot))(); }
@@ -179,20 +194,20 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       if (old !== undefined && old !== line.text) throw new Error("SQLite cache disagrees with canonical OptChat tree");
       if (old === undefined) db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,count,line.text);
     }
-    // Keep the saved view (view.json, else data.db) and append only lines for messages it lacks. It is rebuilt
-    // from the log only when there is none, e.g. a restored backup: a rebuilt view differs from the live one.
-    queues.delete(bot);
-    const state = viewState(bot);
-    const saved = options.archive.loadView(bot)?.map(([l, i]) => ({ start: i * 2 ** l, count: 2 ** l }));
-    if (saved) state.view = saved;
-    let covered = tiles(state.view);
-    if (covered < 0 || covered > data.main.length || state.view.some(part => part.count > 1 && node(bot, part) === undefined)) { state.view = []; state.draining = false; state.cview = null; covered = 0; }
-    if (state.cview && tiles(state.cview) !== covered) state.cview = null;
-    known.delete(bot);
-    const {size,isBuilt}=frozen(bot);
-    for (let i = covered; i < data.main.length; i++) appendToState(bot, state, i, size, isBuilt);
-    if (!state.cview) state.cview = appendCompactionLine(null, state.view, data.main.length - 1, size, isBuilt, true);
+    // Keep the saved view (view.json, else data.db); fit extends it to the messages it lacks. With none (a restored
+    // backup), keep the largest built nodes, as UniiChat opens a chat with no view.json: never refold the log.
+    queues.delete(bot); known.delete(bot);
+    const state = viewState(bot), saved = options.archive.loadView(bot);
+    const toParts = (pairs: [number, number][]) => pairs.map(([l, i]) => ({ start: i * 2 ** l, count: 2 ** l }));
+    if (saved) {
+      state.view = { parts: toParts(saved.parts), batch: saved.batch };
+      if (saved.seen) state.seen = { parts: toParts(saved.seen.parts), batch: saved.seen.batch };
+    }
+    const valid = (parts: Part[]) => { const n = tiles(parts); return n >= 0 && n <= data.main.length && parts.every(part => part.count === 1 || node(bot, part) !== undefined); };
+    if (!valid(state.view.parts) || (!saved && !db.prepare("SELECT 1 FROM optchat_view WHERE bot_id=?").get(bot) && data.main.length)) state.view = { parts: tileBuilt(bot, data.main.length), batch: false };
+    if (!valid(state.seen.parts)) state.seen = { parts: state.view.parts.map(part => ({ ...part })), batch: false };
     saveState(bot, state);
+    refit(bot, false);
     loaded.add(bot);
   }
   function partBytes(part: Part, text: (part: Part) => string | undefined) { return bytes(text(part) ?? "(not summarized yet: zoom it)"); }
@@ -224,8 +239,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     options.archive?.appendMain(bot,{ i: idx, kind, text, size: bytes(`${kind}: ${text}`), date, eventKey: key, threadId });
     db.prepare("INSERT INTO optchat_log VALUES (?,?,?,?,?,?,?)").run(bot, idx, key, kind, text, date, threadId);
     queues.get(bot)?.leaves.push(idx);
-    if (bytes(`${kind}: ${text}`) <= NODE_BYTES) saveNode(bot, idx, 1, `${kind}: ${text}`);
-    if (foldView) { const state = viewState(bot); appendToState(bot, state, idx, sized(bot), built(bot)); saveState(bot, state); }
+    if (foldView) refit(bot, true);
     return idx;
   }
   function requireLease(bot: string, threadId: string, lease: string) {
@@ -233,12 +247,10 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     if (!run || run.threadId !== threadId || run.expires <= now()) throw new Error("OptChat lease expired or belongs to another conversation");
     return run;
   }
-  function render(bot: string, before = Infinity, ids = true) {
-    return parts(bot).filter((p) => p.start < before).map((p) => {
-      const text = node(bot, p);
-      if (text === undefined) throw new Error("Memory is not settled; finish pending summaries first");
-      return `${ids ? `${label(p)}|` : ""}${text.replace(/\r\n|\n|\r/g, " ")}`;
-    }).join("\n");
+  /** UniiChat Memory.view: the built lines of `parts` before message `end`, as `<chat>\n` + `id+n|line\n`... + `</chat>\n`. */
+  function chatText(bot: string, parts: Part[], end = Infinity) {
+    const lines = parts.filter(part => part.start + part.count <= end).flatMap(part => { const text = node(bot, part); return text === undefined ? [] : [`${label(part)}|${flatLine(text)}\n`]; });
+    return `<chat>\n${lines.join("")}</chat>\n`;
   }
   function pending(bot: string): Compression | null {
     const total = count(bot);
@@ -255,50 +267,53 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
         if (node(bot, parent) !== undefined) continue;
         const a = node(bot, { start: parent.start, count: size / 2 });
         const b = node(bot, { start: parent.start + size / 2, count: size / 2 });
-        if (a !== undefined && b !== undefined) return { ...parent, source: `${a}\n${b}`, children:[a,b], context: compactionView(bot, parent.start+parent.count) };
+        if (a !== undefined && b !== undefined) return { ...parent, source: mergeSource(a, b), children:[a,b], context: compactionView(bot, parent.start+parent.count) };
       }
     }
     return null;
   }
-  // A compaction's view ends at the node: the compactions' view up to `end` (split where a line runs past it),
-  // stopping at the first unbuilt line, so no call sees a placeholder or half a message (§4).
+  // A compaction's view: the compactions' view's built lines before min(the node's end, the first message not
+  // built), whole lines only (UniiChat Memory.build: Memory.view(mem, upto, mem.seen.parts)).
   function compactionView(bot: string, end: number) {
-    const state = viewState(bot), lines: string[] = []; let stopped = false;
-    function take(part: Part) {
-      if (stopped || part.start >= end) return;
-      if (part.start + part.count > end && part.count > 1) { take({ start: part.start, count: part.count / 2 }); take({ start: part.start + part.count / 2, count: part.count / 2 }); return; }
-      const text = node(bot, part);
-      if (text === undefined) { stopped = true; return; }
-      lines.push(`${label(part)}|${text.replace(/\r\n|\n|\r/g, " ")}`);
-    }
-    for (const part of state.cview ?? state.view) take(part);
-    return `<chat>\n${lines.join("\n")}\n</chat>`;
+    const total = count(bot), first = queue(bot).leaves[0] ?? total;
+    return chatText(bot, viewState(bot).seen.parts, Math.min(end, first));
   }
   function drainFree(bot: string) {
     let task: Compression | null;
-    while ((task = pending(bot)) && bytes(task.source) <= NODE_BYTES) {
-      saveNode(bot, task.start, task.count, task.source);
-    }
+    let builtAny = false;
+    while ((task = pending(bot)) && bytes(task.source) <= NODE_BYTES) { saveNode(bot, task.start, task.count, task.source); builtAny = true; }
+    if (builtAny) { refit(bot, false); if (task) task = pending(bot); }
     return task;
   }
   /**
-   * Ready compactions (§4): a message's node once fewer than 8 lines before it are unbuilt (the first 8 unbuilt
-   * messages), and every merge whose halves are built. Oldest first.
+   * UniiChat Memory.starts: the nodes ready up to the WINDOW-th message not built, in the order the messages came
+   * (a node's ctx: a message's index, a merge's end; a merge first on a tie). Those whose source fits are built at
+   * once, together, until none is left; the others are returned as jobs, `limit` at most.
    */
   function available(bot:string,busy:ReadonlySet<string>,limit:number) {
-    const q=queue(bot), tasks:(Part&{source:string;children?:string[]})[]=[];
-    for(const start of q.leaves.slice(0,8)) {
-      if(busy.has(`${start}+1`)) continue;
-      const raw=entry(bot,start)!; tasks.push({start,count:1,source:`${raw.kind}: ${raw.text}`});
+    const q=queue(bot), total=count(bot);
+    const ctx=(part:Part)=>part.count===1?part.start:part.start+part.count;
+    let builtAny=false, tasks:(Part&{source:string;children?:string[]})[]=[];
+    for(;;) {
+      const end=q.leaves[WINDOW-1]??total;
+      const ready=[...q.leaves.filter(start=>start<=end).map(start=>({start,count:1})),...[...q.merges.values()].filter(part=>ctx(part)<=end)];
+      ready.sort((x,y)=>ctx(x)-ctx(y)||y.count-x.count);
+      const free:(Part&{source:string})[]=[];tasks=[];
+      for(const part of ready) {
+        if(tasks.length>=limit) break;
+        if(busy.has(label(part))) continue;
+        let source:string, children:string[]|undefined;
+        if(part.count===1){const raw=entry(bot,part.start)!;source=`${raw.kind}: ${raw.text}`;}
+        else{const a=node(bot,{start:part.start,count:part.count/2}),b=node(bot,{start:part.start+part.count/2,count:part.count/2});if(a===undefined||b===undefined)continue;children=[a,b];source=mergeSource(a,b);}
+        if(bytes(source)<=NODE_BYTES) free.push({...part,source});
+        else tasks.push({...part,source,...(children?{children}:{})});
+      }
+      if(!free.length) break;
+      for(const part of free) saveNode(bot,part.start,part.count,part.source);
+      builtAny=true;
     }
-    for(const part of q.merges.values()) {
-      if(busy.has(label(part))) continue;
-      const a=node(bot,{start:part.start,count:part.count/2}), b=node(bot,{start:part.start+part.count/2,count:part.count/2});
-      if(a!==undefined&&b!==undefined) tasks.push({...part,source:`${a}\n${b}`,children:[a,b]});
-    }
-    const end=(task:Part)=>task.count===1?task.start:task.start+task.count;
-    tasks.sort((x,y)=>end(x)-end(y)||x.count-y.count);
-    return tasks.slice(0,limit).map(task=>({...task,context:compactionView(bot,end(task))}));
+    if(builtAny) refit(bot,false);
+    return tasks.map(task=>({...task,context:compactionView(bot,ctx(task))}));
   }
   return {
     hydrate,
@@ -323,11 +338,9 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       db.transaction(()=>{
         const indexes=planned.map(row=>append(bot,row.threadId,row.eventKey,row.kind,row.text,row.date,false));
         for(const tree of [...trees].sort((x,y)=>x.l-y.l)){const n=2**tree.l,start=tree.i*n;if(node(bot,{start,count:n})===undefined)saveNode(bot,start,n,tree.text);}
-        const state=viewState(bot), {size,isBuilt}=frozen(bot);
-        for(const idx of indexes)appendToState(bot,state,idx,size,isBuilt);
-        saveState(bot,state);
+        void indexes;
       })();
-      queues.delete(bot);return {imported:planned.length,entries:count(bot)};
+      queues.delete(bot); refit(bot,true); return {imported:planned.length,entries:count(bot)};
     },
     snapshot(bot:string) {
       hydrate(bot);
@@ -348,12 +361,12 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       if(!text.trim()) throw new Error("Summary must be nonempty");
       const raw=task.count===1?entry(bot,task.start):undefined;
       const a=task.count>1?node(bot,{start:task.start,count:task.count/2}):undefined,b=task.count>1?node(bot,{start:task.start+task.count/2,count:task.count/2}):undefined;
-      const source=raw?`${raw.kind}: ${raw.text}`:a!==undefined&&b!==undefined?`${a}\n${b}`:undefined;
+      const source=raw?`${raw.kind}: ${raw.text}`:a!==undefined&&b!==undefined?mergeSource(a,b):undefined;
       if(source!==task.source) throw new Error("Stale background compression");
-      saveNode(bot,task.start,task.count,text);
+      saveNode(bot,task.start,task.count,text); refit(bot,false);
     },
-    // A turn waits until every line of the view is built (§6); only new messages change its size.
-    settled(bot:string) { return parts(bot).every(part=>node(bot,part)!==undefined); },
+    // A turn waits until every message before it is summarized (UniiChat Memory.settle: first unbuilt >= from).
+    settled(bot:string) { return queue(bot).leaves.length===0; },
     begin: db.transaction((bot: string, threadId: string, requestId: string, input?: string) => {
       const existing = db.prepare("SELECT status,result,answer,thread_id AS threadId FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot, requestId) as { status: string; result: string; answer: string | null; threadId: string } | undefined;
       if (existing && existing.threadId !== threadId) throw new Error("Request belongs to another conversation");
@@ -402,12 +415,12 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       }
       const task = pending(bot);
       if (!task || task.start !== start || task.count !== size) throw new Error("Stale or out-of-order compression");
-      saveNode(bot, start, size, text);
+      saveNode(bot, start, size, text); refit(bot, false);
       return { ok: true };
     }),
     view(bot: string) {
-      const text = `<chat>\n${render(bot)}\n</chat>`;
-      const summaryBytes=parts(bot).reduce((sum,part)=>sum+bytes(node(bot,part)!),0);
+      const text = chatText(bot, parts(bot));
+      const summaryBytes=parts(bot).reduce((sum,part)=>sum+(nodeBytes(bot,part)??0),0);
       return { text, entries: count(bot), bytes: bytes(text), summaryBytes };
     },
     finish: db.transaction((bot: string, thread: string, lease: string, status: "completed" | "failed" | "stopped", result: string) => {

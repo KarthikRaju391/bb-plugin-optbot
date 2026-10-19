@@ -7,7 +7,13 @@ import { tmpdir } from "node:os";
 import { z } from "zod";
 
 const mainSchema = z.object({ i: z.number().int().nonnegative(), kind: z.enum(["user", "talk", "tool", "echo", "work", "note"]), text: z.string(), size: z.number().int().nonnegative(), date: z.string().datetime(), eventKey: z.string().optional(), threadId: z.string().optional() });
-const viewSchema = z.array(z.tuple([z.number().int().nonnegative().max(52), z.number().int().nonnegative()]));
+const pairsSchema = z.array(z.tuple([z.number().int().nonnegative().max(52), z.number().int().nonnegative()]));
+// view.json as UniiChat writes it ({parts, batch, seen}); an earlier OptBot wrote the bare parts array.
+const viewSchema = z.union([
+  z.object({ parts: pairsSchema, batch: z.boolean(), seen: z.object({ parts: pairsSchema, batch: z.boolean() }).optional() }),
+  pairsSchema.transform(parts => ({ parts, batch: false, seen: undefined })),
+]);
+export type SavedView = { parts: [number, number][]; batch: boolean; seen?: { parts: [number, number][]; batch: boolean } };
 const treeSchema = z.object({ l: z.number().int().nonnegative().max(52), i: z.number().int().nonnegative(), text: z.string(), size: z.number().int().nonnegative() });
 export type MainLine = z.infer<typeof mainSchema>;
 const receiptSchema=z.object({id:z.string().min(1),parentId:z.string().min(1),threadId:z.string(),text:z.string(),date:z.string().datetime()}).strict();
@@ -34,14 +40,14 @@ function writeLine(path: string, value: unknown) {
 
 // view.json: the view as [l, i] pairs (spec §1), loaded at start, never rebuilt. Plain functions of the chat folder,
 // so a reloaded plugin can use them even while the archive writer it shares was created by the previous version.
-function readView(root: string, bot: string, warn: (message: string) => void): [number, number][] | null {
+function readView(root: string, bot: string, warn: (message: string) => void): SavedView | null {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(bot)) throw new Error("Invalid bot ID");
   const path = join(root, bot, "view.json");
   if (!existsSync(path)) return null;
   if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error("Unsafe OptChat view file");
   try { return viewSchema.parse(JSON.parse(readFileSync(path, "utf8"))); } catch { warn("Skipped an invalid view.json"); return null; }
 }
-function writeView(root: string, bot: string, pairs: [number, number][]) {
+function writeView(root: string, bot: string, pairs: SavedView) {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(bot)) throw new Error("Invalid bot ID");
   const dir = join(root, bot); directory(dir);
   const path = join(dir, "view.json"), temp = join(dir, ".view.json.tmp");
@@ -146,7 +152,7 @@ async function createArchive(rootPath: string, warn: (message: string) => void =
       writeLine(join(root,bot,"tree",localDay()+".jsonl"),valid); data.tree.set(key,valid);
     },
     loadView(bot: string) { load(bot); return readView(root, bot, warn); },
-    saveView(bot: string, pairs: [number, number][]) { load(bot); writeView(root, bot, pairs); },
+    saveView(bot: string, pairs: SavedView) { load(bot); writeView(root, bot, pairs); },
     async close() { if (closed) return; closed=true; await new Promise<void>((resolveClose,reject)=>server.close(error=>error?reject(error):resolveClose())); },
   };
 }

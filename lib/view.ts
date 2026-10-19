@@ -2,7 +2,7 @@
 export type Part = { start: number; count: number };
 /** The chat's view: a sawtooth from 64 KB to 128 KB. */
 export const VIEW_HIGH = 128_000, VIEW_LOW = 64_000;
-/** The compactions' view: the chat's view merged further, a sawtooth from 16 KB to 32 KB. */
+/** The compactions' view (UniiChat `seen`): its own sawtooth from 16 KB to 32 KB, to the first message not built. */
 export const CVIEW_HIGH = 32_000, CVIEW_LOW = 16_000;
 
 /**
@@ -35,31 +35,33 @@ export function shrink(view: Part[], total: number, size: (part: Part) => number
   return { used, merged };
 }
 
-/**
- * A new message appends its line; nothing else changes the view. Once the view passes `high`, one batch
- * merges down to `low`; a batch that cannot get there yet (unbuilt parents) continues at each new message.
- */
-export function appendLine(view: Part[], index: number, size: (part: Part) => number, built: (part: Part) => boolean, draining: boolean, high = VIEW_HIGH, low = VIEW_LOW) {
-  view.push({ start: index, count: 1 });
-  let used = view.reduce((sum, part) => sum + size(part), 0), merged = 0;
-  if (draining || used > high) ({ used, merged } = shrink(view, index + 1, size, built, low, used));
-  return { draining: (draining || merged > 0 || used > high) && used > low, merged };
+/** A view and whether its batch is still going (UniiChat Memory.View: parts, batch). */
+export type Box = { parts: Part[]; batch: boolean };
+
+/** UniiChat Memory.reach: the view to message `end`; its lines from it dropped, the messages to it appended. */
+export function reach(parts: Part[], end: number) {
+  let keep = parts.length;
+  while (keep > 0 && parts[keep - 1]!.start + parts[keep - 1]!.count > end) keep--;
+  parts.length = keep;
+  for (let i = keep ? parts[keep - 1]!.start + parts[keep - 1]!.count : 0; i < end; i++) parts.push({ start: i, count: 1 });
 }
 
 /**
- * The compactions' view: merged down to 16 KB once, then the chat's new lines are appended; merged again
- * once it passes 32 KB, or when the chat's view merges.
+ * UniiChat Memory.fit for one view, to message `end`: past `high` bytes a batch merges the most due pairs down to
+ * half. Between messages it is kept only if it gets there (or as far as size - high); at a message (`next`) it
+ * goes as far as it can, and goes on at later messages while the view is over half. Sizes count built lines only.
  */
-export function appendCompactionLine(cview: Part[] | null, view: readonly Part[], index: number, size: (part: Part) => number, built: (part: Part) => boolean, chatMerged: boolean) {
-  if (!cview || chatMerged) {
-    const fresh = view.map(part => ({ ...part }));
-    shrink(fresh, index + 1, size, built, CVIEW_LOW);
-    return fresh;
+export function fitBox(box: Box, end: number, high: number, size: (part: Part) => number, built: (part: Part) => boolean, next: boolean) {
+  const before = JSON.stringify(box);
+  reach(box.parts, end);
+  let used = box.parts.reduce((sum, part) => sum + size(part), 0);
+  if (used > high || (next && box.batch)) {
+    const merged = box.parts.map(part => ({ ...part }));
+    const result = shrink(merged, end, size, built, high / 2, used);
+    if (next || result.used <= Math.max(high / 2, used - high)) { box.parts = merged; used = result.used; }
+    box.batch = used > high / 2;
   }
-  cview.push({ start: index, count: 1 });
-  const used = cview.reduce((sum, part) => sum + size(part), 0);
-  if (used > CVIEW_HIGH) shrink(cview, index + 1, size, built, CVIEW_LOW, used);
-  return cview;
+  return JSON.stringify(box) !== before;
 }
 
 /** Whether parts tile [0, n) with aligned power-of-two lines (a saved view that can be kept). */

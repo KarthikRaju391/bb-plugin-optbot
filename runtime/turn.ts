@@ -1,3 +1,4 @@
+import { TURN_HEAD } from "./prompts";
 import { randomUUID } from "node:crypto";
 import type { Compression, MemoryKind } from "../lib/optchat";
 import type {PluginProviderReasoningLevel} from "@get-bb/plugin-sdk";
@@ -91,7 +92,8 @@ export async function runOptChatTurn(args: {
     for (let round = 0; ; round++) {
       result = undefined;
       let lastTalk = "";
-      for await (const event of model.stream(`${view.text}\n\n<current-request>\n${request}\n</current-request>`, options)) {
+      // UniiChat Server.ts: the view, then "Turn: the user's new message:" and the message whole.
+      for await (const event of model.stream(`${view.text}${TURN_HEAD}${request}`, options)) {
         check();
         if (event.kind === "result") {
           if (!event.success) throw new Error(event.text || "Model turn failed");
