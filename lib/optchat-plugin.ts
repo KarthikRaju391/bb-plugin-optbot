@@ -92,7 +92,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     parentId:z.string().min(1).max(128).optional(),
     key: z.string().min(1).max(256).optional(), kind: z.enum(["user", "talk", "tool", "echo", "work", "note"]).optional(),
     text: z.string().optional(), start: z.number().int().nonnegative().optional(),
-    count: z.number().int().positive().optional(), status: z.enum(["completed", "failed", "stopped"]).optional(),
+    count: z.number().int().positive().optional(), at: z.number().int().nonnegative().optional(), status: z.enum(["completed", "failed", "stopped"]).optional(),
   }).strict();
   bb.agents.registerTool({
     name: "optbot_chat", description: "Private OptBot runtime persistence protocol. Managed by the harness; not an agent-facing memory editing tool.",
@@ -118,7 +118,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
         case "work": result = chat.work(bot, ctx.threadId, lease()); break;
         case "merge": result = chat.merge(bot, ctx.threadId, lease(), required(input.start, "start"), required(input.count, "count"), required(input.text, "text")); break;
         case "view": result = chat.view(bot); break;
-        case "zoom": result=chat.zoomText(bot,required(input.start,"start"),required(input.count,"count")); break;
+        case "zoom": result=chat.zoomText(bot,required(input.start,"start"),required(input.count,"count"),input.at??0); break;
         case "date": result=chat.dateText(bot,required(input.start,"start")); break;
         case "finish": result = chat.finish(bot, ctx.threadId, lease(), required(input.status, "status"), required(input.text, "text")); break;
       }
@@ -128,11 +128,11 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   });
   // Spec §7.1: the agent's only memory tools are zoom and date, with the reference descriptions and output.
   bb.agents.registerTool({
-    name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. date: The date and time of message id.",
-    parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative(), count: z.number().int().positive().optional() }).strict(),
+    name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A long text comes in pages from character at, saying where to go on. date: The date and time of message id.",
+    parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative(), count: z.number().int().positive().optional(), at: z.number().int().nonnegative().optional() }).strict(),
     async execute(input, ctx) {
       const bot = await scope(ctx.threadId);
-      return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1);
+      return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1, input.at ?? 0);
     },
   });
   async function poolEnv(model:string) {

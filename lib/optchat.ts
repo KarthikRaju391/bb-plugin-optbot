@@ -28,6 +28,17 @@ export function pageEnd(text: string, at: number) {
   if (newline >= at) return newline + 1;
   return at + MESSAGE_CHARS - (/[\uDC00-\uDFFF]/.test(text[at + MESSAGE_CHARS]!) ? 1 : 0); // never split a surrogate pair
 }
+/** A text's page from `at`, and where to go on (UniiChat clip_page). */
+export function clipPage(text: string, at: number) {
+  const end = pageEnd(text, at);
+  return text.slice(at, end) + (end < text.length ? `\n[characters ${at + 1}-${end} of ${text.length}; go on with at ${end}]` : "");
+}
+/** The tree's roots over `total` messages: the largest aligned lines, oldest first. */
+function roots(total: number) {
+  const result: string[] = [];
+  for (let start = 0, size = 2 ** Math.floor(Math.log2(Math.max(1, total))); start < total; size /= 2) if (start + size <= total) { result.push(`${start}+${size}`); start += size; }
+  return result;
+}
 function chunks(text: string) {
   const result: string[] = [];
   for (let at = 0; at < text.length;) { const end = pageEnd(text, at); result.push(text.slice(at, end)); at = end; }
@@ -419,12 +430,15 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
         return { start: idx, count: size / 2, text };
       });
     },
-    zoomText(bot:string,start:number,size:number) {
-      if(!Number.isSafeInteger(start)||start<0||!Number.isSafeInteger(size)||size<1||Math.log2(size)%1!==0||start%size!==0||start+size>count(bot))return `No line ${start}+${size}.`;
-      if(size===1){const raw=entry(bot,start)!;return `${start}+0|${raw.kind}: ${raw.text}`;}
-      return [start,start+size/2].map(idx=>{const value=node(bot,{start:idx,count:size/2});return value===undefined?`No line ${idx}+${size/2}.`:`${idx}+${size/2}|${value.replace(/\r\n|\n|\r/g," ")}`;}).join("\n");
+    // UniiChat Memory.zoom: a message (n = 1) a page from `at`; else the two lines under id+n, an unbuilt one as the
+    // placeholder; a bad line names the tree's roots so the agent can start over from them.
+    zoomText(bot:string,start:number,size:number,at=0) {
+      const total=count(bot);
+      if(!Number.isSafeInteger(start)||start<0||!Number.isSafeInteger(size)||size<1||Math.log2(size)%1!==0||start%size!==0||start+size>total)return `No line ${start}+${size}: n is a power of 2, id a multiple of n. The tree's roots: ${roots(total).join(", ")}.`;
+      if(size===1){const raw=entry(bot,start)!;return `${start}+0|${raw.kind}: ${clipPage(raw.text,Math.max(0,Math.min(at,raw.text.length)))}`;}
+      return [start,start+size/2].map(idx=>{const value=node(bot,{start:idx,count:size/2});return `${idx}+${size/2}|${value===undefined?"(not summarized yet: zoom it)":value.replace(/\s*(\r\n|\n|\r)\s*/g," ")}`;}).join("\n");
     },
-    dateText(bot:string,id:number) {const raw=entry(bot,id);return raw?new Date(raw.date).toString():`No message ${id}.`;},
+    dateText(bot:string,id:number) {const raw=entry(bot,id);return raw?new Date(raw.date).toLocaleString("sv-SE"):`No message ${id}.`;},
     search(bot: string, query: string, after = -1) {
       return db.prepare("SELECT idx,kind,date,thread_id AS threadId,substr(text,1,2000) AS text FROM optchat_log WHERE bot_id=? AND idx>? AND instr(lower(text),lower(?))>0 ORDER BY idx LIMIT 50").all(bot, after, query) as Entry[];
     },
