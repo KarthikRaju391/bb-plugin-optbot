@@ -6,7 +6,7 @@ import { REPORT } from "./agents";
 
 export const NODE_BYTES = 512;
 export const VIEW_BYTES = VIEW_HIGH;
-const LEASE_MS = 60_000;
+export const LEASE_MS = 60_000;
 export type MemoryKind = "user" | "talk" | "tool" | "echo" | "work" | "note";
 /** A line as views show it: newlines and the whitespace around them as one space (UniiChat Memory.flat). */
 export function flatLine(text: string) { return text.includes("\n") ? text.replace(/\s*\n\s*/g, " ") : text; }
@@ -19,6 +19,7 @@ export const MESSAGE_CHARS = 30_000;
  * "[Name]" (the bot's name, else the thread's id); anything else is the user's words.
  */
 export function inputEntry(text: string): { kind: MemoryKind; text: string } {
+  if (RESUME.test(text)) return { kind: "note", text }; // OptBot's own word after a restart (UniiChat Chat.resume)
   if (REPORT.test(text)) return { kind: "work", text }; // a subagent's report: "[Name]\n...\n\nFull chat: ..."
   const message = /^\[bb message from thread:(thr_[A-Za-z0-9]+)\][ \t]*\r?\n+([\s\S]*)$/.exec(text);
   if (!message) return { kind: "user", text };
@@ -27,6 +28,10 @@ export function inputEntry(text: string): { kind: MemoryKind; text: string } {
   if (bot) { if (bot[1]!.trim() !== "BB agent") name = bot[1]!.trim(); body = bot[2]!; }
   return { kind: "work", text: `[${name}] ${body}` };
 }
+/** UniiChat Server.ts TURN and Chat.resume: what a restart cut goes on, told so. */
+export const TURN_NAME = "OptBot's turn";
+export function resumeText(work: string[]) { return `The server restarted, cutting ${work.join(", ")}; nothing was lost: go on.`; }
+export const RESUME = /^The server restarted, cutting [^\n]+; nothing was lost: go on\.$/;
 /** Where the page of a text from `at` ends: MESSAGE_CHARS on, after its last newline if it has one (UniiChat clip_end). */
 export function pageEnd(text: string, at: number) {
   if (text.length - at <= MESSAGE_CHARS) return text.length;
@@ -429,7 +434,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const run=requireLease(bot, thread, lease);
       flushInbox(bot,run.requestId);
       if (status === "failed") append(bot, thread, `failure:${lease}`, "note", `Attempt failed: ${result}. Verify prior side effects before retrying.`);
-      if (status === "stopped") append(bot, thread, `stopped:${lease}`, "note", "Stopped by the user: OptBot's turn.");
+      if (status === "stopped") append(bot, thread, `stopped:${lease}`, "note", `Stopped by the user: ${TURN_NAME}.`);
       db.prepare("UPDATE optchat_runs SET status=?,result=?,expires=0 WHERE bot_id=? AND lease=?").run(status === "stopped" ? "failed" : status, result, bot, lease);
       return { ok: true };
     }),
@@ -457,6 +462,17 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     search(bot: string, query: string, after = -1) {
       return db.prepare("SELECT idx,kind,date,thread_id AS threadId,substr(text,1,2000) AS text FROM optchat_log WHERE bot_id=? AND idx>? AND instr(lower(text),lower(?))>0 ORDER BY idx LIMIT 50").all(bot, after, query) as Entry[];
     },
+    /** Turns still marked running: a restart cut those whose lease ran out (their bridge heartbeats every 10 s). */
+    runningTurns() { return db.prepare("SELECT bot_id AS bot,thread_id AS threadId,request_id AS requestId,expires FROM optchat_runs WHERE status='active'").all() as { bot: string; threadId: string; requestId: string; expires: number }[]; },
+    /** Ends a cut turn, keeping the messages that waited on it; false if it ended or came back meanwhile. */
+    abandon: db.transaction((bot: string, requestId: string) => {
+      const run = db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND request_id=? AND status='active' AND expires<=?").get(bot, requestId, now());
+      if (!run) return false;
+      flushInbox(bot, requestId);
+      db.prepare("UPDATE optchat_runs SET status='failed',result='cut by a restart' WHERE bot_id=? AND request_id=?").run(bot, requestId);
+      return true;
+    }),
+    note: db.transaction((bot: string, threadId: string, key: string, text: string) => append(bot, threadId, key, "note", text)),
     /** Whether a turn in this conversation still holds an unexpired lease (its bridge heartbeats every 10 s). */
     liveTurn(threadId: string) { return db.prepare("SELECT 1 FROM optchat_runs WHERE thread_id=? AND status='active' AND expires>?").get(threadId, now()) !== undefined; },
     stats(bot: string) { return { entries: count(bot), nodes: (db.prepare("SELECT COUNT(*) AS n FROM optchat_nodes WHERE bot_id=?").get(bot) as { n: number }).n, parts: parts(bot) }; },

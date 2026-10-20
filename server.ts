@@ -15,6 +15,7 @@ import { BOT_GUIDANCE, botInstructions } from "./lib/bot-instructions";
 import { MEMORY_MAX_CHARS, validateMemory } from "./lib/memory-limit";
 import { registerOptChat } from "./lib/optchat-plugin";
 import { createBbWorkers, nativeEvents, workerInput } from "./lib/bb-workers";
+import { scheduleResume } from "./lib/resume";
 import { createAgents, spawnInput, tellInput, SPAWN_DESCRIPTION, TELL_DESCRIPTION } from "./lib/agents";
 import { bbModelRef } from "./runtime/bb";
 import { memoryCommands } from "./lib/memory-operations";
@@ -231,6 +232,9 @@ export default async function plugin(bb: BbPluginApi) {
   // Subagents (UniiChat spawn/tell): visible BB threads under the bot's conversation, reporting back as `work`.
   agents = createAgents(bb, { view: bot => { optchat.hydrate(bot); return optchat.view(bot).text; }, rules, worker: threadId => workers.workerOf(threadId), nativeEvents: item => nativeEvents(item as Parameters<typeof nativeEvents>[0]) });
   const subagents = agents;
+  // UniiChat Chat.wake: what a restart cut goes on, told so.
+  const stopResume = scheduleResume(bb, optchat, subagents);
+  bb.onDispose(stopResume);
   bb.agents.configure((ctx) => {
     const worker = workers.configuration(ctx);
     // The worker prompt carries the full instructions; BB truncates configured ones.

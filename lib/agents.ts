@@ -160,5 +160,29 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     if (status !== "active" && status !== "starting") await report(thread.id, error ?? "the agent's thread failed");
   });
 
-  return { spawn, tell, chat, isAgent: (threadId: string) => byThread(threadId) !== undefined, report };
+  /**
+   * After a restart: agents that finished meanwhile report; those cut, by conversation, are returned to go on
+   * (UniiChat Chat.resume). An agent whose thread is gone is let go.
+   */
+  async function recover() {
+    const cut = new Map<string, { bot: string; names: string[] }>();
+    for (const row of db.prepare("SELECT * FROM optbot_agents WHERE status='active'").all() as Row[]) {
+      const thread = await bb.sdk.threads.get({ threadId: row.thread }).catch(() => null);
+      if (!thread || thread.archivedAt) { db.prepare("UPDATE optbot_agents SET status='idle' WHERE thread=?").run(row.thread); continue; }
+      if (thread.status === "active" || thread.status === "starting") continue;
+      const ends = await bb.sdk.threads.events.list({ threadId: row.thread, afterSeq: row.cursor ?? undefined, order: "asc", limit: "100", types: ["turn/completed"] } as Parameters<typeof bb.sdk.threads.events.list>[0]) as { data: { status?: string } }[];
+      if (ends.some(end => end.data.status === "completed")) { await report(row.thread); continue; }
+      const entry = cut.get(row.conversation) ?? { bot: row.bot, names: [] };
+      entry.names.push(row.name); cut.set(row.conversation, entry);
+    }
+    return cut;
+  }
+  async function goOn(bot: string, name: string, text: string) {
+    const row = byName(bot, name);
+    if (!row) return;
+    log(bot, name, "user", text);
+    await bb.sdk.threads.send({ threadId: row.thread, mode: "auto", input: [{ type: "text", text, mentions: [] }] } as Parameters<typeof bb.sdk.threads.send>[0]);
+  }
+
+  return { spawn, tell, chat, recover, goOn, isAgent: (threadId: string) => byThread(threadId) !== undefined, report };
 }
