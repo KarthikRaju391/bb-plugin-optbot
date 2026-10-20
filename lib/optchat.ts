@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Archive, Receipt, TreeLine, MainLine } from "./archive";
 import { CVIEW_HIGH, fitBox, tiles, VIEW_HIGH, type Box } from "./view";
+import { REPORT } from "./agents";
 
 export const NODE_BYTES = 512;
 export const VIEW_BYTES = VIEW_HIGH;
@@ -18,6 +19,7 @@ export const MESSAGE_CHARS = 30_000;
  * "[Name]" (the bot's name, else the thread's id); anything else is the user's words.
  */
 export function inputEntry(text: string): { kind: MemoryKind; text: string } {
+  if (REPORT.test(text)) return { kind: "work", text }; // a subagent's report: "[Name]\n...\n\nFull chat: ..."
   const message = /^\[bb message from thread:(thr_[A-Za-z0-9]+)\][ \t]*\r?\n+([\s\S]*)$/.exec(text);
   if (!message) return { kind: "user", text };
   let name = message[1]!, body = message[2]!;

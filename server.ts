@@ -14,7 +14,8 @@ import { botProjectContext } from "./lib/project-context";
 import { BOT_GUIDANCE, botInstructions } from "./lib/bot-instructions";
 import { MEMORY_MAX_CHARS, validateMemory } from "./lib/memory-limit";
 import { registerOptChat } from "./lib/optchat-plugin";
-import { createBbWorkers, workerInput } from "./lib/bb-workers";
+import { createBbWorkers, nativeEvents, workerInput } from "./lib/bb-workers";
+import { createAgents, spawnInput, tellInput, SPAWN_DESCRIPTION, TELL_DESCRIPTION } from "./lib/agents";
 import { bbModelRef } from "./runtime/bb";
 import { memoryCommands } from "./lib/memory-operations";
 export { rpcContract, avatarSchema } from "./contract";
@@ -223,12 +224,19 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const contextOwner = (ctx: PluginAgentConfigurationContext) => owner(ctx.thread);
   // A bot's rules follow the system prompt in its summaries too, as in its turns (UniiChat Tools.system).
-  const optchat=await registerOptChat(bb, resolveOwner, workers, bot => { const value = store.get(bot); return value ? botInstructions(value) : undefined; });
+  const rules = (bot: string) => { const value = store.get(bot); return value ? botInstructions(value) : undefined; };
+  let agents: ReturnType<typeof createAgents> | null = null;
+  const optchat=await registerOptChat(bb, resolveOwner, workers, rules, (bot, name) => agents?.chat(bot, name) ?? null);
   workers.setLiveTurnProbe(threadId => optchat.liveTurn(threadId));
+  // Subagents (UniiChat spawn/tell): visible BB threads under the bot's conversation, reporting back as `work`.
+  agents = createAgents(bb, { view: bot => { optchat.hydrate(bot); return optchat.view(bot).text; }, rules, worker: threadId => workers.workerOf(threadId), nativeEvents: item => nativeEvents(item as Parameters<typeof nativeEvents>[0]) });
+  const subagents = agents;
   bb.agents.configure((ctx) => {
     const worker = workers.configuration(ctx);
     // The worker prompt carries the full instructions; BB truncates configured ones.
-    if (worker) return { tools: worker.role === "master" ? ["optbot_read_state", "optbot_update_state", "optbot_memory"] : [], skills: [] };
+    if (worker) return { tools: worker.role === "master" ? ["optbot_read_state", "optbot_update_state", "optbot_memory", "optbot_spawn", "optbot_tell"] : [], skills: [] };
+    // An agent's thread: its row may not exist yet on the first configure, so the spawn's metadata counts too.
+    if (typeof ctx.pluginMetadata.optbotAgent === "string" || subagents.isAgent(ctx.thread.id)) return { tools: ["optbot_memory"], skills: [] };
     const botId = contextOwner(ctx);
     const bot = botId ? store.get(botId) : null;
     return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory", "optbot_worker"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
@@ -243,6 +251,8 @@ export default async function plugin(bb: BbPluginApi) {
       return JSON.stringify(await workers.execute(input,ctx.threadId,bot));
     },
   });
+  bb.agents.registerTool({ name: "optbot_spawn", description: SPAWN_DESCRIPTION, parameters: spawnInput, execute: (input, ctx) => subagents.spawn(ctx.threadId, input) });
+  bb.agents.registerTool({ name: "optbot_tell", description: TELL_DESCRIPTION, parameters: tellInput, execute: (input, ctx) => subagents.tell(ctx.threadId, input) });
   bb.agents.registerTool({
     name: "optbot_read_state", description: "Read this bot's identity, settings, or linked projects. Your memory is the conversation history: use optbot_memory to zoom into it.",
     instructions: BOT_GUIDANCE,

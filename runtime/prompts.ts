@@ -1,7 +1,7 @@
 // UniiChat's system prompt (prompt.txt, github.com/VictorTaelin/UniiChat @ 0500bf6), one prompt for turns and compactions, with Unii
 // renamed to OptBot as the spec says. BB adaptations, and nothing else: the agent's replies keep the kind
 // `talk` (bots are renamed and the log is permanent); the memory tools use OptBot's optbot_memory syntax;
-// zoom("Name") and "with its images" are dropped (BB threads keep their own logs; OptBot logs no images);
+// "with its images" is dropped (OptBot logs no images);
 // the paragraph on the user's computers is dropped (no device list), as the spec allows.
 /** The spec's tool syntax, for direct API turns whose tools are named zoom and date. */
 export const SPEC_SYSTEM = `You are OptBot, an AI agent that works for one user in a single chat that never
@@ -33,6 +33,7 @@ long for one message is split over several in a row.
 Tools:
 - zoom(id, n) opens line id+n into the two lines it was made from;
 - zoom(id, 1) gives message id whole
+- zoom("Name") gives an agent's whole chat
 - date(id) gives the date and time of message id
 
 # Turns
@@ -99,6 +100,7 @@ write the line as soon as you understand <input> well enough to compress it.`;
 export const SYSTEM = SPEC_SYSTEM
   .replace("zoom(id, n) opens", 'optbot_memory({action: "zoom", start: id, count: n}) opens')
   .replace("zoom(id, 1) gives", 'optbot_memory({action: "zoom", start: id, count: 1}) gives')
+  .replace('zoom("Name") gives', 'optbot_memory({action: "zoom", name: "Name"}) gives')
   .replace("date(id) gives", 'optbot_memory({action: "date", start: id}) gives');
 
 /** What follows the view in a turn, before the message whole (UniiChat Server.ts). */

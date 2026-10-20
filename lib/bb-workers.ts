@@ -7,7 +7,7 @@ import type {ModelEvent} from "../runtime/turn";
 import {capResult} from "../runtime/cache";
 type NativeItem = Extract<Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>[number], {type:"item/completed"}>["data"]["item"];
 // SDK canonical items separate invocation fields from execution/result metadata.
-function nativeEvents(item:NativeItem):ModelEvent[] {
+export function nativeEvents(item:NativeItem):ModelEvent[] {
  const id=item.id;
  const text=(value:unknown)=>typeof value==="string"?value:JSON.stringify(value)??"";
  // Only command output is clipped to its head and tail (UniiChat Clip.ts); any other result is kept whole and paged.
@@ -36,7 +36,7 @@ function nativeEvents(item:NativeItem):ModelEvent[] {
 }
 
 export const workerInput=z.object({action:z.enum(["start","poll","stop","steer"]),key:z.string().uuid().optional(),workerId:z.string().optional(),model:z.string().optional(),prompt:z.string().optional(),instructions:z.string().optional(),permissionMode:z.enum(["full","plan","auto","accept-edits"]).optional(),reasoningLevel:z.enum(["high","low","max","medium","none","ultra","ultracode","xhigh"]).optional(),serviceTier:z.enum(["default","fast"]).optional(),cursor:z.string().regex(/^\d+$/).optional(),text:z.string().optional()}).strict();
-type Row={key:string;parent:string|null;bot:string|null;worker:string|null;fingerprint:string;instructions:string;role:"master"|"summary";status:string;pending_result:string|null};
+type Row={key:string;parent:string|null;bot:string|null;worker:string|null;fingerprint:string;instructions:string;role:"master"|"summary";status:string;pending_result:string|null;model:string|null;reasoning:string|null};
 // BB's server can freeze for seconds (synchronous SQLite) and drop a connection mid-request.
 // A running worker is unaffected, so read-only checks retry instead of failing the turn.
 const NETWORK=TRANSIENT_NETWORK;
@@ -64,6 +64,8 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
  const db=bb.storage.database();
  db.exec("CREATE TABLE IF NOT EXISTS optbot_workers (key TEXT PRIMARY KEY,parent TEXT,bot TEXT,worker TEXT UNIQUE,fingerprint TEXT NOT NULL,instructions TEXT NOT NULL,role TEXT NOT NULL,status TEXT NOT NULL)");
  if(!(db.prepare("PRAGMA table_info(optbot_workers)").all() as {name:string}[]).some(column=>column.name==="pending_result"))db.exec("ALTER TABLE optbot_workers ADD COLUMN pending_result TEXT");
+ // The turn's model and effort, so subagents a turn starts run on the same (a BB thread does not expose its model).
+ if(!(db.prepare("PRAGMA table_info(optbot_workers)").all() as {name:string}[]).some(column=>column.name==="model"))db.exec("ALTER TABLE optbot_workers ADD COLUMN model TEXT; ALTER TABLE optbot_workers ADD COLUMN reasoning TEXT");
  db.exec("CREATE TABLE IF NOT EXISTS optbot_worker_cancellations (key TEXT PRIMARY KEY,parent TEXT,bot TEXT)");
  const locks=new Map<string,Promise<unknown>>();
  const open=new Map<string,Map<string,{id:string;name:string;input:unknown}>>();
@@ -96,7 +98,7 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
    const fingerprint=createHash("sha256").update(JSON.stringify(args)).digest("hex");
    const row=db.prepare("SELECT * FROM optbot_workers WHERE key=?").get(args.key) as Row|undefined;
    if(row){if(row.fingerprint!==fingerprint)throw new Error("Worker key reused with different input");if(!row.worker)throw new Error("Worker spawn was interrupted; retry with a fresh request");return {workerId:row.worker};}
-   db.prepare("INSERT INTO optbot_workers (key,parent,bot,worker,fingerprint,instructions,role,status) VALUES (?,?,?,?,?,?,?,?)").run(args.key,args.parent,args.bot,null,fingerprint,args.instructions,args.role,"starting");
+   db.prepare("INSERT INTO optbot_workers (key,parent,bot,worker,fingerprint,instructions,role,status,model,reasoning) VALUES (?,?,?,?,?,?,?,?,?,?)").run(args.key,args.parent,args.bot,null,fingerprint,args.instructions,args.role,"starting",args.model,args.reasoningLevel??null);
    const worker=await bb.sdk.threads.spawn({projectId:args.projectId,environment:args.environment,...ref,...(args.reasoningLevel?{reasoningLevel:args.reasoningLevel}:{}),...(args.serviceTier?{serviceTier:args.serviceTier}:{}),prompt:`${args.instructions}\n\n${args.prompt}`,title:args.role==="summary"?"OptBot memory summary":"OptBot execution",visibility:"hidden",permissionMode:args.role==="summary"?"auto":args.permissionMode,pluginMetadata:{workerKey:args.key},...(args.parent?{lifecycleOwnerThreadId:args.parent}:{})});
    db.prepare("UPDATE optbot_workers SET worker=?,status='active' WHERE key=?").run(worker.id,args.key);
    if(db.prepare("SELECT key FROM optbot_worker_cancellations WHERE key=?").get(args.key)){await stop(worker.id);throw new Error("Worker request was cancelled");}
@@ -220,5 +222,7 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   } catch {bb.log.warn("OptBot worker recovery remains pending; inspect the hidden worker timeline.");}
  }));
  bb.onDispose(async()=>{closed=true;await recovery;await Promise.allSettled([...locks.values()]);const rows=db.prepare("SELECT worker FROM optbot_workers WHERE worker IS NOT NULL AND status!='stopped'").all() as {worker:string}[];await Promise.all(rows.map(row=>stop(row.worker)));});
- return {setLiveTurnProbe(probe:(threadId:string)=>boolean){liveTurn=probe;},configuration,owner:(threadId:string)=>{const row=find(threadId);return row?.status==="stopped"?null:row?.bot??null;},execute,start,poll,stop,cancelKey,key:randomUUID};
+ return {setLiveTurnProbe(probe:(threadId:string)=>boolean){liveTurn=probe;},configuration,owner:(threadId:string)=>{const row=find(threadId);return row?.status==="stopped"?null:row?.bot??null;},
+  /** A live worker thread's bot and the conversation it serves (for tools a turn calls). */
+  workerOf:(threadId:string)=>{const row=find(threadId);return row&&row.status!=="stopped"&&row.bot&&row.parent?{bot:row.bot,parent:row.parent,model:row.model,reasoning:row.reasoning}:null;},execute,start,poll,stop,cancelKey,key:randomUUID};
 }

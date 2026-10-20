@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { createOptChat } from "./optchat";
+import { clipPage, createOptChat } from "./optchat";
 import { openArchive } from "./archive";
 import { dirname, join } from "node:path";
 import { acquireCompactor, compactNode } from "./compactor";
@@ -15,7 +15,7 @@ const SUMMARY_CALL_TIMEOUT_MS = 300_000;
 const summarizerRef = (model: string) => /^bb\/(claude-code|pi)(\/|$)/.test(model) ? cliRef(model) : codexRef(model);
 import type { createBbWorkers } from "./bb-workers";
 
-export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined) {
+export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined, agentChat?: (bot: string, name: string) => string | null) {
   const db = bb.storage.database();
   const root=join(dirname(db.name),"chat");
   const archive = await openArchive(root, message=>bb.log.warn(message));
@@ -128,10 +128,13 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   });
   // Spec §7.1: the agent's only memory tools are zoom and date, with the reference descriptions and output.
   bb.agents.registerTool({
-    name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A long text comes in pages from character at, saying where to go on. date: The date and time of message id.",
-    parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative(), count: z.number().int().positive().optional(), at: z.number().int().nonnegative().optional() }).strict(),
+    name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. With an agent's name, give that agent's whole chat. A long text comes in pages from character at, saying where to go on. date: The date and time of message id.",
+    parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative().optional(), count: z.number().int().positive().optional(), name: z.string().min(1).max(64).optional(), at: z.number().int().nonnegative().optional() }).strict(),
     async execute(input, ctx) {
       const bot = await scope(ctx.threadId);
+      // UniiChat Tools.ts: zoom with an agent's name gives its whole chat, in pages.
+      if (input.action === "zoom" && input.name !== undefined) { const text = agentChat?.(bot, input.name); return text ? clipPage(text, Math.min(input.at ?? 0, text.length)) : `No agent ${input.name}.`; }
+      if (input.start === undefined) return "Give start (a message id), or name for an agent's chat.";
       return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1, input.at ?? 0);
     },
   });
