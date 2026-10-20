@@ -227,7 +227,7 @@ export default async function plugin(bb: BbPluginApi) {
   // A bot's rules follow the system prompt in its summaries too, as in its turns (UniiChat Tools.system).
   const rules = (bot: string) => { const value = store.get(bot); return value ? botInstructions(value) : undefined; };
   let agents: ReturnType<typeof createAgents> | null = null;
-  const optchat=await registerOptChat(bb, resolveOwner, workers, rules, (bot, name) => agents?.chat(bot, name) ?? null);
+  const optchat=await registerOptChat(bb, resolveOwner, workers, rules, async (bot, name) => agents ? await agents.chat(bot, name) : null);
   workers.setLiveTurnProbe(threadId => optchat.liveTurn(threadId));
   // Subagents (UniiChat spawn/tell): visible BB threads under the bot's conversation, reporting back as `work`.
   agents = createAgents(bb, { view: bot => { optchat.hydrate(bot); return optchat.view(bot).text; }, rules, worker: threadId => workers.workerOf(threadId), nativeEvents: item => nativeEvents(item as Parameters<typeof nativeEvents>[0]) });

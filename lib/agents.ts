@@ -1,7 +1,7 @@
 // Subagents, as UniiChat's Tools.ts spawn/tell and Call.ts reports, on BB: an agent is a visible BB thread under the
 // bot's conversation, on the turn's provider and model. It starts from the bot's view and its own chat; when it goes
 // idle its replies come back to the conversation as one `work` message, "[Name]\n...\n\nFull chat: ...". The bot
-// never waits or polls. Each agent's chat is kept (optbot_agent_log) and readable with optbot_memory zoom by name.
+// never waits or polls. An agent's chat is its BB thread: zoom by name reads it from the thread's events, live.
 import { z } from "zod";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ModelEvent } from "../runtime/turn";
@@ -74,18 +74,37 @@ type Deps = {
 
 export function createAgents(bb: BbPluginApi, deps: Deps) {
   const db = bb.storage.database();
-  db.exec(`CREATE TABLE IF NOT EXISTS optbot_agents (bot TEXT NOT NULL, name TEXT NOT NULL, thread TEXT NOT NULL UNIQUE, conversation TEXT NOT NULL, cursor TEXT, status TEXT NOT NULL, PRIMARY KEY(bot, name));
-    CREATE TABLE IF NOT EXISTS optbot_agent_log (bot TEXT NOT NULL, name TEXT NOT NULL, i INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, date TEXT NOT NULL, PRIMARY KEY(bot, name, i));`);
+  db.exec(`CREATE TABLE IF NOT EXISTS optbot_agents (bot TEXT NOT NULL, name TEXT NOT NULL, thread TEXT NOT NULL UNIQUE, conversation TEXT NOT NULL, cursor TEXT, status TEXT NOT NULL, PRIMARY KEY(bot, name));`);
   const byName = (bot: string, name: string) => db.prepare("SELECT * FROM optbot_agents WHERE bot=? AND name=?").get(bot, name) as Row | undefined;
   const byThread = (thread: string) => db.prepare("SELECT * FROM optbot_agents WHERE thread=?").get(thread) as Row | undefined;
-  function log(bot: string, name: string, kind: string, text: string) {
-    const i = (db.prepare("SELECT COUNT(*) AS n FROM optbot_agent_log WHERE bot=? AND name=?").get(bot, name) as { n: number }).n;
-    db.prepare("INSERT INTO optbot_agent_log VALUES (?,?,?,?,?,?)").run(bot, name, i, kind, text, new Date().toISOString());
+  type Event = { seq: number; type: string; data: { item?: unknown; input?: { type: string; text?: string }[]; status?: string; error?: { message?: string } } };
+  async function events(threadId: string, types: string[], after?: string) {
+    const all: Event[] = [];
+    for (let cursor = after; ;) {
+      const rows = await bb.sdk.threads.events.list({ threadId, afterSeq: cursor, order: "asc", limit: "100", types } as unknown as Parameters<typeof bb.sdk.threads.events.list>[0]) as Event[];
+      all.push(...rows);
+      if (rows.length < 100) return all;
+      cursor = String(rows.at(-1)!.seq);
+    }
   }
-  /** UniiChat Memory.agent_show: an agent's chat as "i|kind: text" entries. */
-  function chat(bot: string, name: string) {
-    const rows = db.prepare("SELECT i,kind,text FROM optbot_agent_log WHERE bot=? AND name=? ORDER BY i").all(bot, name) as { i: number; kind: string; text: string }[];
-    return rows.length ? rows.map(row => `${row.i}|${row.kind}: ${row.text}`).join("\n\n") : null;
+  const entryText = (entry: ModelEvent) => entry.kind === "tool" ? `${entry.name} ${JSON.stringify(entry.input)}` : entry.kind === "echo" ? (entry.error ? "error: " : "") + (entry.text || "(no output)") : entry.kind === "talk" ? entry.text : null;
+  /** UniiChat Memory.agent_show: an agent's chat as "i|kind: text" entries, read from its BB thread. */
+  async function chat(bot: string, name: string) {
+    const row = byName(bot, name);
+    if (!row) return null;
+    const lines: string[] = [];
+    for (const event of await events(row.thread, ["client/turn/requested", "item/completed"])) {
+      if (event.type === "client/turn/requested") {
+        const text = (event.data.input ?? []).flatMap(block => block.type === "text" && block.text ? [block.text] : []).join("\n\n");
+        // Its first message: the prompt and the view, then its note and task; only those two are its chat.
+        const first = lines.length === 0 ? /\n\n0\|note: ([^\n]*)\n\n1\|user: ([\s\S]*)$/.exec(text) : null;
+        if (first) lines.push(`note: ${first[1]}`, `user: ${first[2]}`);
+        else if (text) lines.push(`user: ${text}`);
+        continue;
+      }
+      for (const entry of deps.nativeEvents(event.data.item)) { const text = entryText(entry); if (text !== null) lines.push(`${entry.kind}: ${text}`); }
+    }
+    return lines.map((line, i) => `${i}|${line}`).join("\n\n");
   }
 
   async function spawn(workerThread: string, input: z.infer<typeof spawnInput>) {
@@ -107,10 +126,7 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
         prompt: first, title: `${name}: ${task.split("\n")[0]!.slice(0, 60)}`, parentThreadId: owner.parent, permissionMode: "full",
         pluginMetadata: { optbotAgent: name },
       } as Parameters<typeof bb.sdk.threads.spawn>[0]);
-      db.transaction(() => {
-        db.prepare("INSERT INTO optbot_agents VALUES (?,?,?,?,NULL,'active')").run(owner.bot, name, thread.id, owner.parent);
-        log(owner.bot, name, "note", note); log(owner.bot, name, "user", task);
-      })();
+      db.prepare("INSERT INTO optbot_agents VALUES (?,?,?,?,NULL,'active')").run(owner.bot, name, thread.id, owner.parent);
     }
     return `Started ${names.join(", ")}. Each one's report will reach you as a message when it finishes.`;
   }
@@ -121,7 +137,6 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     if (!owner || !row) return `No agent ${input.name} to tell.`;
     const thread = await bb.sdk.threads.get({ threadId: row.thread });
     const working = thread.status === "active" || thread.status === "starting";
-    log(owner.bot, row.name, "user", input.message);
     db.prepare("UPDATE optbot_agents SET status='active' WHERE thread=?").run(row.thread);
     await bb.sdk.threads.send({ threadId: row.thread, mode: working ? "steer" : "start", input: [{ type: "text", text: input.message, mentions: [] }] } as Parameters<typeof bb.sdk.threads.send>[0]);
     return working ? `Sent. ${row.name} reads it between its tool calls, and its report answers it.` : `Sent. ${row.name}'s reply will reach you as a message.`;
@@ -133,19 +148,10 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     if (!row || row.status !== "active") return;
     const replies: string[] = [];
     let cursor = row.cursor ?? undefined;
-    for (;;) {
-      const rows = await bb.sdk.threads.events.list({ threadId, afterSeq: cursor, order: "asc", limit: "100", types: ["item/completed", "turn/completed"] } as Parameters<typeof bb.sdk.threads.events.list>[0]) as { seq: number; type: string; data: { item?: unknown; status?: string; error?: { message?: string } } }[];
-      for (const event of rows) {
-        cursor = String(event.seq);
-        if (event.type === "turn/completed" && event.data.status !== "completed") replies.push(`failed: ${event.data.error?.message ?? event.data.status}`);
-        if (event.type !== "item/completed") continue;
-        for (const entry of deps.nativeEvents(event.data.item)) {
-          if (entry.kind === "talk") { replies.push(entry.text); log(row.bot, row.name, "talk", entry.text); }
-          else if (entry.kind === "tool") log(row.bot, row.name, "tool", `${entry.name} ${JSON.stringify(entry.input)}`);
-          else if (entry.kind === "echo") log(row.bot, row.name, "echo", (entry.error ? "error: " : "") + (entry.text || "(no output)"));
-        }
-      }
-      if (rows.length < 100) break;
+    for (const event of await events(threadId, ["item/completed", "turn/completed"], cursor)) {
+      cursor = String(event.seq);
+      if (event.type === "turn/completed" && event.data.status !== "completed") replies.push(`failed: ${event.data.error?.message ?? event.data.status}`);
+      if (event.type === "item/completed") for (const entry of deps.nativeEvents(event.data.item)) if (entry.kind === "talk") replies.push(entry.text);
     }
     if (failure && !replies.some(reply => reply.startsWith("failed:"))) replies.push(`failed: ${failure}`);
     db.prepare("UPDATE optbot_agents SET cursor=?, status='idle' WHERE thread=?").run(cursor ?? null, threadId);
@@ -170,7 +176,7 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
       const thread = await bb.sdk.threads.get({ threadId: row.thread }).catch(() => null);
       if (!thread || thread.archivedAt) { db.prepare("UPDATE optbot_agents SET status='idle' WHERE thread=?").run(row.thread); continue; }
       if (thread.status === "active" || thread.status === "starting") continue;
-      const ends = await bb.sdk.threads.events.list({ threadId: row.thread, afterSeq: row.cursor ?? undefined, order: "asc", limit: "100", types: ["turn/completed"] } as Parameters<typeof bb.sdk.threads.events.list>[0]) as { data: { status?: string } }[];
+      const ends = await events(row.thread, ["turn/completed"], row.cursor ?? undefined);
       if (ends.some(end => end.data.status === "completed")) { await report(row.thread); continue; }
       const entry = cut.get(row.conversation) ?? { bot: row.bot, names: [] };
       entry.names.push(row.name); cut.set(row.conversation, entry);
@@ -180,7 +186,6 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
   async function goOn(bot: string, name: string, text: string) {
     const row = byName(bot, name);
     if (!row) return;
-    log(bot, name, "user", text);
     await bb.sdk.threads.send({ threadId: row.thread, mode: "auto", input: [{ type: "text", text, mentions: [] }] } as Parameters<typeof bb.sdk.threads.send>[0]);
   }
 

@@ -15,7 +15,7 @@ const SUMMARY_CALL_TIMEOUT_MS = 300_000;
 const summarizerRef = (model: string) => /^bb\/(claude-code|pi)(\/|$)/.test(model) ? cliRef(model) : codexRef(model);
 import type { createBbWorkers } from "./bb-workers";
 
-export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined, agentChat?: (bot: string, name: string) => string | null) {
+export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined, agentChat?: (bot: string, name: string) => Promise<string | null>) {
   const db = bb.storage.database();
   const root=join(dirname(db.name),"chat");
   const archive = await openArchive(root, message=>bb.log.warn(message));
@@ -133,7 +133,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     async execute(input, ctx) {
       const bot = await scope(ctx.threadId);
       // UniiChat Tools.ts: zoom with an agent's name gives its whole chat, in pages.
-      if (input.action === "zoom" && input.name !== undefined) { const text = agentChat?.(bot, input.name); return text ? clipPage(text, Math.min(input.at ?? 0, text.length)) : `No agent ${input.name}.`; }
+      if (input.action === "zoom" && input.name !== undefined) { const text = await agentChat?.(bot, input.name); return text ? clipPage(text, Math.min(input.at ?? 0, text.length)) : `No agent ${input.name}.`; }
       if (input.start === undefined) return "Give start (a message id), or name for an agent's chat.";
       return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1, input.at ?? 0);
     },
