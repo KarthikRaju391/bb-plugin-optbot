@@ -142,33 +142,25 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     return working ? `Sent. ${row.name} reads it between its tool calls, and its report answers it.` : `Sent. ${row.name}'s reply will reach you as a message.`;
   }
 
-  /** An agent went idle (or failed): log its chat since the last report and send its replies to the conversation. */
-  async function report(threadId: string, failure?: string) {
-    const row = byThread(threadId);
-    if (!row || row.status !== "active") return;
-    const replies: string[] = [];
-    let cursor = row.cursor ?? undefined;
-    for (const event of await events(threadId, ["item/completed", "turn/completed"], cursor)) {
-      cursor = String(event.seq);
-      if (event.type === "turn/completed" && event.data.status !== "completed") replies.push(`failed: ${event.data.error?.message ?? event.data.status}`);
-      if (event.type === "item/completed") for (const entry of deps.nativeEvents(event.data.item)) if (entry.kind === "talk") replies.push(entry.text);
-    }
-    if (failure && !replies.some(reply => reply.startsWith("failed:"))) replies.push(`failed: ${failure}`);
-    db.prepare("UPDATE optbot_agents SET cursor=?, status='idle' WHERE thread=?").run(cursor ?? null, threadId);
-    const text = reportText(row.name, replies.join("\n\n") || "(no reply)");
-    await bb.sdk.threads.send({ threadId: row.conversation, mode: "auto", input: [{ type: "text", text, mentions: [] }] } as Parameters<typeof bb.sdk.threads.send>[0]);
-  }
-  bb.events.on("thread.idle", async ({ thread }) => { if (byThread(thread.id)) await report(thread.id); });
-  // BB marks a thread failed when one command fails, even while its turn runs on: report only once it stopped.
-  bb.events.on("thread.failed", async ({ thread, error }) => {
+  // BB itself tells the parent conversation when a child thread completes, fails or is interrupted ("[bb system]
+  // @thread:<id> completed: <its final reply>"); OptBot logs that as the agent's report (optchat inputEntry).
+  // Here an agent is only marked done, so a restart knows which agents it cut.
+  const settle = (threadId: string) => db.prepare("UPDATE optbot_agents SET status='idle' WHERE thread=?").run(threadId);
+  bb.events.on("thread.idle", ({ thread }) => { if (byThread(thread.id)) settle(thread.id); });
+  // BB marks a thread failed when one command fails, even while its turn runs on: done only once it stopped.
+  bb.events.on("thread.failed", async ({ thread }) => {
     if (!byThread(thread.id)) return;
     const { status } = await bb.sdk.threads.get({ threadId: thread.id });
-    if (status !== "active" && status !== "starting") await report(thread.id, error ?? "the agent's thread failed");
+    if (status !== "active" && status !== "starting") settle(thread.id);
   });
+  async function last(threadId: string, type: string) {
+    const [event] = await bb.sdk.threads.events.list({ threadId, order: "desc", limit: "1", types: [type] } as unknown as Parameters<typeof bb.sdk.threads.events.list>[0]) as Event[];
+    return event;
+  }
 
   /**
-   * After a restart: agents that finished meanwhile report; those cut, by conversation, are returned to go on
-   * (UniiChat Chat.resume). An agent whose thread is gone is let go.
+   * After a restart: agents whose last turn was cut (started and never completed, or interrupted) are returned by
+   * conversation to go on (UniiChat Chat.resume). Those that finished are done: BB delivers their outcome itself.
    */
   async function recover() {
     const cut = new Map<string, { bot: string; names: string[] }>();
@@ -176,8 +168,9 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
       const thread = await bb.sdk.threads.get({ threadId: row.thread }).catch(() => null);
       if (!thread || thread.archivedAt) { db.prepare("UPDATE optbot_agents SET status='idle' WHERE thread=?").run(row.thread); continue; }
       if (thread.status === "active" || thread.status === "starting") continue;
-      const ends = await events(row.thread, ["turn/completed"], row.cursor ?? undefined);
-      if (ends.some(end => end.data.status === "completed")) { await report(row.thread); continue; }
+      const [started, completed] = [await last(row.thread, "turn/started"), await last(row.thread, "turn/completed")];
+      const cutShort = !completed || (started !== undefined && started.seq > completed.seq) || completed.data.status === "interrupted";
+      if (!cutShort) { settle(row.thread); continue; }
       const entry = cut.get(row.conversation) ?? { bot: row.bot, names: [] };
       entry.names.push(row.name); cut.set(row.conversation, entry);
     }
@@ -189,5 +182,5 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     await bb.sdk.threads.send({ threadId: row.thread, mode: "auto", input: [{ type: "text", text, mentions: [] }] } as Parameters<typeof bb.sdk.threads.send>[0]);
   }
 
-  return { spawn, tell, chat, recover, goOn, isAgent: (threadId: string) => byThread(threadId) !== undefined, report };
+  return { spawn, tell, chat, recover, goOn, isAgent: (threadId: string) => byThread(threadId) !== undefined, name: (threadId: string) => byThread(threadId)?.name ?? null };
 }

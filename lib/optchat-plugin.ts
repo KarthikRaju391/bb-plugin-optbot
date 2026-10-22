@@ -15,11 +15,11 @@ const SUMMARY_CALL_TIMEOUT_MS = 300_000;
 const summarizerRef = (model: string) => /^bb\/(claude-code|pi)(\/|$)/.test(model) ? cliRef(model) : codexRef(model);
 import type { createBbWorkers } from "./bb-workers";
 
-export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined, agentChat?: (bot: string, name: string) => Promise<string | null>) {
+export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined, agents?: { chat(bot: string, name: string): Promise<string | null>; name(threadId: string): string | null }) {
   const db = bb.storage.database();
   const root=join(dirname(db.name),"chat");
   const archive = await openArchive(root, message=>bb.log.warn(message));
-  const chat = createOptChat(db, { archive });
+  const chat = createOptChat(db, { archive, agentName: threadId => agents?.name(threadId) ?? null });
   const settings=bb.settings.define({
     compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex[/<model>], bb/claude-code[/<model>], bb/pi[/<provider>/<model>] or, with compactorAccountPooler on, pool/claude/<model> or pool/codex/<model>: a tool-less text call through that CLI's own login on the compactor machine (no API key). Prefer a small model, e.g. bb/codex/gpt-6-luna, bb/claude-code/claude-haiku-4-5-20251001 or bb/pi/openai-codex/gpt-6-luna."},
     compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine where the compactor model's CLI (codex, claude or pi) is signed in. No separate API key is required."},
@@ -133,7 +133,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     async execute(input, ctx) {
       const bot = await scope(ctx.threadId);
       // UniiChat Tools.ts: zoom with an agent's name gives its whole chat, in pages.
-      if (input.action === "zoom" && input.name !== undefined) { const text = await agentChat?.(bot, input.name); return text ? clipPage(text, Math.min(input.at ?? 0, text.length)) : `No agent ${input.name}.`; }
+      if (input.action === "zoom" && input.name !== undefined) { const text = await agents?.chat(bot, input.name); return text ? clipPage(text, Math.min(input.at ?? 0, text.length)) : `No agent ${input.name}.`; }
       if (input.start === undefined) return "Give start (a message id), or name for an agent's chat.";
       return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1, input.at ?? 0);
     },

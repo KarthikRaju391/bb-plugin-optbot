@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Archive, Receipt, TreeLine, MainLine } from "./archive";
 import { CVIEW_HIGH, fitBox, tiles, VIEW_HIGH, type Box } from "./view";
-import { REPORT } from "./agents";
+import { REPORT, reportText } from "./agents";
 
 export const NODE_BYTES = 512;
 export const VIEW_BYTES = VIEW_HIGH;
@@ -18,9 +18,17 @@ export const MESSAGE_CHARS = 30_000;
  * An incoming message as the log records it (§1): a report from another BB thread or bot is `work`, starting
  * "[Name]" (the bot's name, else the thread's id); anything else is the user's words.
  */
-export function inputEntry(text: string): { kind: MemoryKind; text: string } {
+export function inputEntry(text: string, agentName?: (threadId: string) => string | null): { kind: MemoryKind; text: string } {
   if (RESUME.test(text)) return { kind: "note", text }; // OptBot's own word after a restart (UniiChat Chat.resume)
   if (REPORT.test(text)) return { kind: "work", text }; // a subagent's report: "[Name]\n...\n\nFull chat: ..."
+  // BB's own word that a child thread completed, failed or was interrupted: a subagent's report (UniiChat Call.ts).
+  const notice = /^\[bb system\]\n\n@thread:(thr_[A-Za-z0-9]+) ([a-z][a-z -]*):\n\n([\s\S]*)$/.exec(text);
+  if (notice) {
+    const [, thread, outcome, body] = notice as unknown as [string, string, string, string];
+    const said = outcome === "completed" ? body : `${outcome}: ${body}`, name = agentName?.(thread);
+    return { kind: "work", text: name ? reportText(name, said) : `[${thread}] ${said}` };
+  }
+  if (text.startsWith("[bb system]")) return { kind: "work", text }; // other BB notices are never the user's words
   const message = /^\[bb message from thread:(thr_[A-Za-z0-9]+)\][ \t]*\r?\n+([\s\S]*)$/.exec(text);
   if (!message) return { kind: "user", text };
   let name = message[1]!, body = message[2]!;
@@ -64,7 +72,7 @@ const label = (part: Part) => `${part.start}+${part.count}`;
 const PLACEHOLDER_BYTES = Buffer.byteLength("(not summarized yet: zoom it)");
 
 /** Server-owned store: all hosts share one bot log, with transactional writes. */
-export function createOptChat(db: Database.Database, options: { viewBytes?: number; now?: () => number; archive?: Archive } = {}) {
+export function createOptChat(db: Database.Database, options: { viewBytes?: number; now?: () => number; archive?: Archive; agentName?: (threadId: string) => string | null } = {}) {
   const budget = options.viewBytes ?? VIEW_BYTES;
   const now = options.now ?? Date.now;
   if (budget < NODE_BYTES + 128) throw new Error("Memory view budget is too small");
@@ -226,7 +234,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   function appendInput(bot:string,threadId:string,key:string,raw:string,date?:string) {
     const old=db.prepare("SELECT idx,kind,text,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot,key) as Entry|undefined;
     if(old&&old.kind==="user"&&old.text===raw&&old.threadId===threadId)return old.idx;
-    const value=inputEntry(raw);return append(bot,threadId,key,value.kind,value.text,date);
+    const value=inputEntry(raw,options.agentName);return append(bot,threadId,key,value.kind,value.text,date);
   }
   function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);}
   function append(bot: string, threadId: string, key: string, kind: MemoryKind, text: string, receivedDate?:string, foldView = true): number {
@@ -379,7 +387,7 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       if (existing && existing.threadId !== threadId) throw new Error("Request belongs to another conversation");
       if (input !== undefined) {
         const previous = db.prepare("SELECT text FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, `${requestId}:input`) as { text: string } | undefined;
-        if (previous && previous.text !== chunks(inputEntry(input).text)[0] && previous.text !== input) throw new Error("Conflicting duplicate request input");
+        if (previous && previous.text !== chunks(inputEntry(input, options.agentName).text)[0] && previous.text !== input) throw new Error("Conflicting duplicate request input");
         receive(bot,threadId,requestId,requestId,input);
       }
       if (existing?.status === "completed") return { status: "completed" as const, result: existing.result };
