@@ -96,7 +96,11 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     const providerTurnId = randomUUID();
     state.providerTurnId=providerTurnId;
     const tools = new Map<string, Extract<ModelEvent, { kind: "tool" }>>();
-    delta(params.threadId, [{ kind: "input.accepted", clientRequestId: params.clientRequestId, providerTurnId }, { kind: "turn.open", providerTurnId }]);
+    // The turn opens before its message is accepted, as native providers report it (turn/started, then
+    // turn/input/accepted). Live BB kept none of the acceptances sent ahead of turn.open (0 of ~960 turns), so a steer BB
+    // turned into this turn stayed "Steer pending" forever (Opty seq 27182, 10482).
+    delta(params.threadId, [{ kind: "turn.open", providerTurnId }]);
+    delta(params.threadId, [{ kind: "input.accepted", clientRequestId: params.clientRequestId, providerTurnId }]);
     const onEvent = (event: ModelEvent) => {
       if (state.released) return;
       if (event.kind === "result") return;
