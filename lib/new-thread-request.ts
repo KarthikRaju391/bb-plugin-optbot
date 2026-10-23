@@ -5,7 +5,8 @@ import { z } from "zod";
 // mentions and attachments intact; the SDK owns execution/environment policy.
 // Like BB's own promptInputSchema, never reject a field BB adds later: unknown
 // keys pass through to threads.spawn, which validates the request itself, and
-// a block without mentions gets none.
+// a block without mentions gets none. Where the thread runs (environment) stays
+// strict: an unknown field there is refused, not passed on.
 const id = z.string().min(1);
 const resource = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("thread"), label: z.string(), threadId: id, projectId: id.optional() }),
@@ -25,27 +26,27 @@ const input = z.discriminatedUnion("type", [
 const environment = z.discriminatedUnion("type", [
   // The current native composer uses environment providers, including
   // personal-workspace for projectless conversations (SDK 0.5.29).
-  z.looseObject({
+  z.strictObject({
     type: z.literal("provider"), environmentProviderId: id,
     inputs: z.json().nullable().default(null),
     machine: z.discriminatedUnion("type", [
-      z.looseObject({ type: z.literal("existing"), hostId: id }),
-      z.looseObject({ type: z.literal("new"), machineProviderId: id, inputs: z.json().nullable().default(null) }),
+      z.strictObject({ type: z.literal("existing"), hostId: id }),
+      z.strictObject({ type: z.literal("new"), machineProviderId: id, inputs: z.json().nullable().default(null) }),
     ]).optional(),
   }),
-  z.looseObject({ type: z.literal("reuse"), environmentId: id }),
-  z.looseObject({ type: z.literal("project-default") }),
-  z.looseObject({
+  z.strictObject({ type: z.literal("reuse"), environmentId: id }),
+  z.strictObject({ type: z.literal("project-default") }),
+  z.strictObject({
     type: z.literal("host"), hostId: id.optional(),
     workspace: z.discriminatedUnion("type", [
-      z.looseObject({ type: z.literal("personal") }),
-      z.looseObject({ type: z.literal("unmanaged"), path: z.string().nullable(), branch: z.discriminatedUnion("kind", [
-        z.looseObject({ kind: z.literal("existing"), name: id }),
-        z.looseObject({ kind: z.literal("new"), baseBranch: id }),
+      z.strictObject({ type: z.literal("personal") }),
+      z.strictObject({ type: z.literal("unmanaged"), path: z.string().nullable(), branch: z.discriminatedUnion("kind", [
+        z.strictObject({ kind: z.literal("existing"), name: id }),
+        z.strictObject({ kind: z.literal("new"), baseBranch: id }),
       ]).optional() }),
-      z.looseObject({ type: z.literal("managed-worktree"), baseBranch: z.discriminatedUnion("kind", [
-        z.looseObject({ kind: z.literal("default") }),
-        z.looseObject({ kind: z.literal("named"), name: id }),
+      z.strictObject({ type: z.literal("managed-worktree"), baseBranch: z.discriminatedUnion("kind", [
+        z.strictObject({ kind: z.literal("default") }),
+        z.strictObject({ kind: z.literal("named"), name: id }),
       ]) }),
     ]),
   }),
