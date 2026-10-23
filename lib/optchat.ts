@@ -233,7 +233,8 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   // receipt (startup recovery, a retried delivery) must match the old entry, not log it again differently.
   function appendInput(bot:string,threadId:string,key:string,raw:string,date?:string) {
     const old=db.prepare("SELECT idx,kind,text,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot,key) as Entry|undefined;
-    if(old&&old.kind==="user"&&old.text===raw&&old.threadId===threadId)return old.idx;
+    // Whatever OptBot would log for it today (a newer kind, an agent's name), the entry already logged stays.
+    if(old&&old.threadId===threadId)return old.idx;
     const value=inputEntry(raw,options.agentName);return append(bot,threadId,key,value.kind,value.text,date);
   }
   function flushInbox(bot:string,parentId:string){for(const row of receipts(bot).values())if(row.parentId===parentId)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);}
@@ -387,7 +388,8 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       if (existing && existing.threadId !== threadId) throw new Error("Request belongs to another conversation");
       if (input !== undefined) {
         const previous = db.prepare("SELECT text FROM optchat_log WHERE bot_id=? AND event_key=?").get(bot, `${requestId}:input`) as { text: string } | undefined;
-        if (previous && previous.text !== chunks(inputEntry(input, options.agentName).text)[0] && previous.text !== input) throw new Error("Conflicting duplicate request input");
+        // The receipt keeps the raw text (receive refuses a different one); the logged form may have changed since.
+        if (previous && receipts(bot).get(requestId)?.text !== input && previous.text !== chunks(inputEntry(input, options.agentName).text)[0] && previous.text !== input) throw new Error("Conflicting duplicate request input");
         receive(bot,threadId,requestId,requestId,input);
       }
       if (existing?.status === "completed") return { status: "completed" as const, result: existing.result };

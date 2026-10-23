@@ -19,7 +19,9 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   const db = bb.storage.database();
   const root=join(dirname(db.name),"chat");
   const archive = await openArchive(root, message=>bb.log.warn(message));
-  const chat = createOptChat(db, { archive, agentName: threadId => agents?.name(threadId) ?? null });
+  // Agents' names straight from their table: startup replays inputs before the agents module is wired.
+  const agentName = (threadId: string) => { try { return (db.prepare("SELECT name FROM optbot_agents WHERE thread=?").get(threadId) as { name: string } | undefined)?.name ?? null; } catch { return null; } };
+  const chat = createOptChat(db, { archive, agentName: threadId => agents?.name(threadId) ?? agentName(threadId) });
   const settings=bb.settings.define({
     compactorModel:{type:"string",label:"Compactor model",default:"bb/codex",description:"bb/codex[/<model>], bb/claude-code[/<model>], bb/pi[/<provider>/<model>] or, with compactorAccountPooler on, pool/claude/<model> or pool/codex/<model>: a tool-less text call through that CLI's own login on the compactor machine (no API key). Prefer a small model, e.g. bb/codex/gpt-6-luna, bb/claude-code/claude-haiku-4-5-20251001 or bb/pi/openai-codex/gpt-6-luna."},
     compactorHost:{type:"string",label:"Compactor BB machine ID",description:"Enrolled machine where the compactor model's CLI (codex, claude or pi) is signed in. No separate API key is required."},
