@@ -10,15 +10,15 @@ import { bbModelRef } from "../runtime/bb";
 export const AGENT_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 export const spawnInput = z.object({ tasks: z.array(z.string().min(1)).min(1).max(16), effort: z.enum(AGENT_EFFORTS).optional() }).strict();
 export const tellInput = z.object({ name: z.string().min(1).max(64), message: z.string().min(1) }).strict();
-export const SPAWN_DESCRIPTION = "Start one subagent per task, in parallel, and return their names at once. Each one's report reaches you as a message \"[Name] report\" when it finishes. A subagent sees the view and the user's instructions, but knows what you want only from its task.";
+export const SPAWN_DESCRIPTION = "Start one subagent per task, in parallel, and return their names at once. Each one's report reaches you as a message \"[Name] report\" when it finishes. A subagent sees the view, but knows what you want only from its task.";
 export const TELL_DESCRIPTION = "Send a message to an agent, by name. One at work reads it between its tool calls, and its report answers it; an idle one goes on from its chat, and its reply reaches you as a message \"[Name] reply\".";
 
-// UniiChat SUB_HEAD and its VIEW_DOC, with Unii renamed OptBot and OptBot's memory tool syntax; no devices.
+// UniiChat SUB_HEAD and its VIEW_DOC, with Unii renamed OptBot and OptBot's memory tool syntax; no devices. The bot's
+// identity (SOUL.md) is left out: it speaks to the bot ("split work into threads"), and the view already carries what
+// the user wants, decided and taught.
 export const SUB_PROMPT = `You are a subagent of OptBot, an AI agent that works for one user in a
 single chat that never ends. OptBot gave you a task. Do it yourself, with
-your tools, following the user's instructions at the end of this
-prompt: they say who the user is, how their files are organized and how
-they want work done.
+your tools; don't hand it to other threads or agents.
 
 Your first message holds the view below, then your chat with OptBot so far,
 its lines as "i|kind: text": what you are (note), your task (user), and
@@ -67,7 +67,6 @@ export const REPORT = /^\[([A-Z][a-z]+[A-Z][a-z]+)\]\n[\s\S]*\n\nFull chat: optb
 type Row = { bot: string; name: string; thread: string; conversation: string; cursor: string | null; status: string };
 type Deps = {
   view(bot: string): string;
-  rules(bot: string): string | undefined;
   worker(threadId: string): { bot: string; parent: string; model: string | null; reasoning: string | null } | null;
   nativeEvents(item: unknown): ModelEvent[];
 };
@@ -113,13 +112,13 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     const [worker, conversation] = await Promise.all([bb.sdk.threads.get({ threadId: workerThread }), bb.sdk.threads.get({ threadId: owner.parent })]);
     const ref = owner.model ? bbModelRef(owner.model) : { providerId: worker.providerId };
     if (!conversation.environmentId) throw new Error("The conversation has no environment for agents");
-    const view = deps.view(owner.bot), rules = deps.rules(owner.bot);
+    const view = deps.view(owner.bot);
     const names: string[] = [];
     for (const task of input.tasks) {
       const name = agentName(candidate => byName(owner.bot, candidate) !== undefined || names.includes(candidate));
       names.push(name);
       const note = SUB_NOTE + (input.effort ? SUB_AT + input.effort : "");
-      const first = [SUB_PROMPT, rules, view, `0|note: ${note}\n\n1|user: ${task}`].filter(Boolean).join("\n\n");
+      const first = [SUB_PROMPT, view, `0|note: ${note}\n\n1|user: ${task}`].join("\n\n");
       const thread = await bb.sdk.threads.spawn({
         projectId: conversation.projectId, environment: { type: "reuse", environmentId: conversation.environmentId },
         ...ref, ...(input.effort ? { reasoningLevel: input.effort } : owner.reasoning ? { reasoningLevel: owner.reasoning } : {}),

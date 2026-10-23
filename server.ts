@@ -230,7 +230,7 @@ export default async function plugin(bb: BbPluginApi) {
   const optchat=await registerOptChat(bb, resolveOwner, workers, rules, { chat: async (bot, name) => agents ? await agents.chat(bot, name) : null, name: threadId => agents?.name(threadId) ?? null });
   workers.setLiveTurnProbe(threadId => optchat.liveTurn(threadId));
   // Subagents (UniiChat spawn/tell): visible BB threads under the bot's conversation, reporting back as `work`.
-  agents = createAgents(bb, { view: bot => { optchat.hydrate(bot); return optchat.view(bot).text; }, rules, worker: threadId => workers.workerOf(threadId), nativeEvents: item => nativeEvents(item as Parameters<typeof nativeEvents>[0]) });
+  agents = createAgents(bb, { view: bot => { optchat.hydrate(bot); return optchat.view(bot).text; }, worker: threadId => workers.workerOf(threadId), nativeEvents: item => nativeEvents(item as Parameters<typeof nativeEvents>[0]) });
   const subagents = agents;
   // UniiChat Chat.wake: what a restart cut goes on, told so.
   const stopResume = scheduleResume(bb, optchat, subagents);
