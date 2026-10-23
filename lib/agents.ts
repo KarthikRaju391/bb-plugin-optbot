@@ -8,9 +8,11 @@ import type { ModelEvent } from "../runtime/turn";
 import { bbModelRef } from "../runtime/bb";
 
 export const AGENT_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
-export const spawnInput = z.object({ tasks: z.array(z.string().min(1)).min(1).max(16), effort: z.enum(AGENT_EFFORTS).optional() }).strict();
+// A task is its text, or {title, task}: the title names the agent's thread in the sidebar (else its first line).
+const spawnTask = z.union([z.string().min(1), z.object({ title: z.string().min(1).max(80), task: z.string().min(1) }).strict()]);
+export const spawnInput = z.object({ tasks: z.array(spawnTask).min(1).max(16), effort: z.enum(AGENT_EFFORTS).optional() }).strict();
 export const tellInput = z.object({ agent: z.string().min(1).max(64), message: z.string().min(1) }).strict();
-export const SPAWN_DESCRIPTION = "Start one subagent per task, in parallel, and return each one's thread id at once; an agent is known by its thread id. Each one's report reaches you as a message \"[thread id] report\" when it finishes. A subagent sees the view, but knows what you want only from its task.";
+export const SPAWN_DESCRIPTION = "Start one subagent per task, in parallel, and return each one's thread id at once; an agent is known by its thread id. Give each task a short title, as {title, task}: it names the agent's thread in the user's sidebar. Each one's report reaches you as a message \"[thread id] report\" when it finishes. A subagent sees the view, but knows what you want only from its task.";
 export const TELL_DESCRIPTION = "Send a message to an agent, by its thread id. One at work reads it between its tool calls, and its report answers it; an idle one goes on from its chat, and its reply reaches you as a message \"[thread id] reply\".";
 
 // UniiChat SUB_HEAD and its VIEW_DOC, with Unii renamed OptBot and OptBot's memory tool syntax; no devices. The bot's
@@ -105,18 +107,20 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     if (!conversation.environmentId) throw new Error("The conversation has no environment for agents");
     const view = deps.view(owner.bot);
     const started: string[] = [];
-    for (const task of input.tasks) {
+    for (const entry of input.tasks) {
+      const task = typeof entry === "string" ? entry : entry.task;
+      const title = (typeof entry === "string" ? entry.split("\n")[0]! : entry.title).slice(0, 80);
       const note = SUB_NOTE + (input.effort ? SUB_AT + input.effort : "");
       const first = [SUB_PROMPT, view, `0|note: ${note}\n\n1|user: ${task}`].join("\n\n");
       const thread = await bb.sdk.threads.spawn({
         projectId: conversation.projectId, environment: { type: "reuse", environmentId: conversation.environmentId },
         ...ref, ...(input.effort ? { reasoningLevel: input.effort } : owner.reasoning ? { reasoningLevel: owner.reasoning } : {}),
-        prompt: first, title: task.split("\n")[0]!.slice(0, 80), parentThreadId: owner.parent, permissionMode: "full",
+        prompt: first, title, parentThreadId: owner.parent, permissionMode: "full",
         pluginMetadata: { optbotAgent: "subagent" },
       } as Parameters<typeof bb.sdk.threads.spawn>[0]);
       // An agent is known by its BB thread id: no made-up name.
       db.prepare("INSERT INTO optbot_agents VALUES (?,?,?,?,NULL,'active')").run(owner.bot, thread.id, thread.id, owner.parent);
-      started.push(`${thread.id}: ${task.split("\n")[0]!.slice(0, 80)}`);
+      started.push(`${thread.id}: ${title}`);
     }
     return `Started:\n${started.join("\n")}\nEach one's report will reach you as a message when it finishes.`;
   }
