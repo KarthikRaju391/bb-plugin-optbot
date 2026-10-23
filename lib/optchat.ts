@@ -368,7 +368,11 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       return {version:1 as const,botId:bot,main,tree,view,inbox:[...receipts(bot).values()]};
     },
     recoverQueued(bot:string){const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());const parents=new Set([...receipts(bot).values()].map(row=>row.parentId));for(const id of parents){const run=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,id) as {status:string;expires:number}|undefined;if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))flushInbox(bot,id);}},
-    enqueue(bot:string,threadId:string,id:string,parentId:string,text:string){const run=db.prepare("SELECT thread_id AS threadId,status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,parentId) as {threadId:string;status:string;expires:number}|undefined;if(!run||run.threadId!==threadId)throw new Error("Queued input does not belong to this conversation's turn");receive(bot,threadId,id,parentId,text);if(run.status!=="active"||run.expires<=now())flushInbox(bot,parentId);return {ok:true};},
+    enqueue(bot:string,threadId:string,id:string,parentId:string,text:string){const run=db.prepare("SELECT thread_id AS threadId,status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,parentId) as {threadId:string;status:string;expires:number}|undefined;
+      // A turn that has not begun yet (its begin still waiting, e.g. on another conversation's turn) takes the message too:
+      // the receipt waits for it, and recoverQueued logs it if that turn never begins (live: a second subagent report
+      // arriving as the first one's turn started was rejected, and lost).
+      if(run&&run.threadId!==threadId)throw new Error("Queued input does not belong to this conversation's turn");receive(bot,threadId,id,parentId,text);if(run&&(run.status!=="active"||run.expires<=now()))flushInbox(bot,parentId);return {ok:true};},
     input(bot:string,threadId:string,lease:string,id:string,text:string){requireLease(bot,threadId,lease);const row=receipts(bot).get(id);return {id:appendInput(bot,threadId,`${id}:input`,text,row?.date)};},
     free: drainFree,
     available,
