@@ -10,7 +10,7 @@ export function bbModelRef(value:string) {
 export type WorkerCall=(input:Record<string,unknown>)=>Promise<unknown>;
 export type WorkerPage={events:ModelEvent[];cursor?:string;done:boolean;open?:{id:string;name:string;input:unknown}[]};
 // The worker thread is hidden: an interactive question there would wait forever, so questions go in the reply.
-const WORKER_NOTE="You run in a hidden worker thread that nobody watches. Never use interactive question or approval tools such as AskUserQuestion; when you need the user's decision, end your turn and ask in your reply.";
+const WORKER_NOTE="You run in a hidden worker thread that nobody watches. Never use interactive question or approval tools such as AskUserQuestion; when you need the user's decision, end your turn and ask in your reply. This thread is closed when your turn ends, which stops anything still running in it: for subagents use optbot_spawn and optbot_tell, which run in their own threads and report back to you, never your built-in agent, task or delegation tools.";
 export function bbWorkerModel(call:WorkerCall):ModelBoundary {
  let open:NonNullable<WorkerPage["open"]>=[];
  return {
