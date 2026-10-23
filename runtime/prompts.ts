@@ -20,7 +20,7 @@ Each message has a kind:
 - talk: OptBot's replies
 - tool: OptBot's tool calls
 - echo: tool results
-- work: an agent's report, starting "[Name]"
+- work: an agent's report, starting "[its thread id]"
 - ai: another AI's replies and tool calls, from an imported chat; not yours
 - note: memories from before this chat
 
@@ -33,7 +33,7 @@ long for one message is split over several in a row.
 Tools:
 - zoom(id, n) opens line id+n into the two lines it was made from;
 - zoom(id, 1) gives message id whole
-- zoom("Name") gives an agent's whole chat
+- zoom("thr_…") gives an agent's whole chat, by its thread id
 - date(id) gives the date and time of message id
 
 # Turns
@@ -51,7 +51,7 @@ say in your reply what you learned that will matter later.
 
 Messages the user sends while you work reach you between tool calls. Subagents
 and computer tasks run in the background; each one's report reaches you as a
-message starting "[Name]", between your tool calls or as a new turn. Never wait
+message starting "[its thread id]", between your tool calls or as a new turn. Never wait
 for one (no sleep, no polling): go on, or end your turn and tell the user what
 is running.
 
@@ -100,7 +100,7 @@ write the line as soon as you understand <input> well enough to compress it.`;
 export const SYSTEM = SPEC_SYSTEM
   .replace("zoom(id, n) opens", 'optbot_memory({action: "zoom", start: id, count: n}) opens')
   .replace("zoom(id, 1) gives", 'optbot_memory({action: "zoom", start: id, count: 1}) gives')
-  .replace('zoom("Name") gives', 'optbot_memory({action: "zoom", name: "Name"}) gives')
+  .replace('zoom("thr_…") gives', 'optbot_memory({action: "zoom", agent: "thr_…"}) gives')
   .replace("date(id) gives", 'optbot_memory({action: "date", start: id}) gives');
 
 /** What follows the view in a turn, before the message whole (UniiChat Server.ts). */

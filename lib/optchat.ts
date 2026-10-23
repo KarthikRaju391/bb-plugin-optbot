@@ -16,11 +16,11 @@ export function mergeSource(a: string, b: string) { return `${flatLine(a)}\n${fl
 export const MESSAGE_CHARS = 30_000;
 /**
  * An incoming message as the log records it (§1): a report from another BB thread or bot is `work`, starting
- * "[Name]" (the bot's name, else the thread's id); anything else is the user's words.
+ * "[Name]" (the bot's name, else the thread's id; a subagent by its thread id); anything else is the user's words.
  */
 export function inputEntry(text: string, agentName?: (threadId: string) => string | null): { kind: MemoryKind; text: string } {
   if (RESUME.test(text)) return { kind: "note", text }; // OptBot's own word after a restart (UniiChat Chat.resume)
-  if (REPORT.test(text)) return { kind: "work", text }; // a subagent's report: "[Name]\n...\n\nFull chat: ..."
+  if (REPORT.test(text)) return { kind: "work", text }; // a subagent's report: "[thr_…]\n...\n\nFull chat: ..."
   // BB's own word that a child thread completed, failed or was interrupted: a subagent's report (UniiChat Call.ts).
   const notice = /^\[bb system\]\n\n@thread:(thr_[A-Za-z0-9]+) ([a-z][a-z -]*):\n\n([\s\S]*)$/.exec(text);
   if (notice) {

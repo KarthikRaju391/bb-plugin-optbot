@@ -148,13 +148,15 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
   });
   // Spec §7.1: the agent's only memory tools are zoom and date, with the reference descriptions and output.
   bb.agents.registerTool({
-    name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. With an agent's name, give that agent's whole chat. A long text comes in pages from character at, saying where to go on. date: The date and time of message id.",
-    parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative().optional(), count: z.number().int().positive().optional(), name: z.string().min(1).max(64).optional(), at: z.number().int().nonnegative().optional() }).strict(),
+    name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. With an agent's thread id, give that agent's whole chat. A long text comes in pages from character at, saying where to go on. date: The date and time of message id.",
+    parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative().optional(), count: z.number().int().positive().optional(), agent: z.string().min(1).max(64).optional(), name: z.string().min(1).max(64).optional(), at: z.number().int().nonnegative().optional() }).strict(),
     async execute(input, ctx) {
       const bot = await scope(ctx.threadId);
       // UniiChat Tools.ts: zoom with an agent's name gives its whole chat, in pages.
-      if (input.action === "zoom" && input.name !== undefined) { const text = await agents?.chat(bot, input.name); return text ? clipPage(text, Math.min(input.at ?? 0, text.length)) : `No agent ${input.name}.`; }
-      if (input.start === undefined) return "Give start (a message id), or name for an agent's chat.";
+      // `name` is the older form, from reports logged when agents had two-word names.
+      const agent = input.agent ?? input.name;
+      if (input.action === "zoom" && agent !== undefined) { const text = await agents?.chat(bot, agent); return text ? clipPage(text, Math.min(input.at ?? 0, text.length)) : `No agent ${agent}.`; }
+      if (input.start === undefined) return "Give start (a message id), or agent (a thread id) for an agent's chat.";
       return input.action === "date" ? chat.dateText(bot, input.start) : chat.zoomText(bot, input.start, input.count ?? 1, input.at ?? 0);
     },
   });
