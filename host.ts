@@ -46,7 +46,7 @@ function describeInput(blocks: readonly InputBlock[]) {
 export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void; toolTimeoutMs?: number; catalog?: () => Promise<Catalog> } = {}) {
   const catalog = deps.catalog ?? cachedCatalog();
   const io = createBridgeIo<unknown>({ write: deps.write });
-  const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string }>();
+  const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string; acknowledged?: boolean }>();
   type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:Incoming[];waiting:Map<string,(taken:boolean)=>void>;closed?:boolean;received:Map<string,string>};
   const active = new Map<string, State>();
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -101,6 +101,15 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     // turned into this turn stayed "Steer pending" forever (Opty seq 27182, 10482).
     delta(params.threadId, [{ kind: "turn.open", providerTurnId }]);
     delta(params.threadId, [{ kind: "input.accepted", clientRequestId: params.clientRequestId, providerTurnId }]);
+    // Once per bridge: steers an older bridge left "pending" (taken, never acknowledged) are acknowledged in this open
+    // turn, in the background so the turn never waits on the lookup. Best effort: if the turn has ended, they stay.
+    if (!session.acknowledged) {
+      session.acknowledged = true;
+      void memory(params.threadId, { action: "unacknowledged" }, providerTurnId).then(stale => {
+        const ids = (stale as string[]).filter(id => id !== params.clientRequestId);
+        if (ids.length && !state.closed && !state.released) delta(params.threadId, ids.map(clientRequestId => ({ kind: "input.accepted" as const, clientRequestId, providerTurnId })));
+      }).catch(() => { /* the bubble stays; the turn goes on */ });
+    }
     const onEvent = (event: ModelEvent) => {
       if (state.released) return;
       if (event.kind === "result") return;

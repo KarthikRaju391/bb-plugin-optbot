@@ -89,13 +89,30 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     models: { scope: "host" },
   });
   const chatSchema = z.object({
-    action: z.enum(["begin", "heartbeat", "checkpoint", "record", "work", "merge", "view", "finish", "settled", "zoom", "date", "input", "enqueue"]),
+    action: z.enum(["begin", "heartbeat", "checkpoint", "record", "work", "merge", "view", "finish", "settled", "zoom", "date", "input", "enqueue", "unacknowledged"]),
     requestId: z.string().min(1).max(128).optional(), lease: z.string().uuid().optional(),
     parentId:z.string().min(1).max(128).optional(),
     key: z.string().min(1).max(256).optional(), kind: z.enum(["user", "talk", "tool", "echo", "work", "note"]).optional(),
     text: z.string().optional(), start: z.number().int().nonnegative().optional(),
     count: z.number().int().positive().optional(), at: z.number().int().nonnegative().optional(), status: z.enum(["completed", "failed", "stopped"]).optional(),
   }).strict();
+  /**
+   * Steers BB still shows as pending: sent as a steer, never accepted (an acceptance sent before its turn opened was
+   * dropped), though a turn took them, as the memory shows. The bridge acknowledges them in its next open turn.
+   */
+  async function unacknowledged(bot: string, threadId: string) {
+    type Row = { type: string; data: { requestId?: string; clientRequestId?: string; target?: { kind?: string } } };
+    const rows: Row[] = [];
+    for (let after: string | undefined; ;) {
+      const page = await bb.sdk.threads.events.list({ threadId, afterSeq: after, order: "asc", limit: "100", types: ["client/turn/requested", "turn/input/accepted"] } as unknown as Parameters<typeof bb.sdk.threads.events.list>[0]) as (Row & { seq: number })[];
+      rows.push(...page);
+      if (page.length < 100) break;
+      after = String(page.at(-1)!.seq);
+    }
+    const accepted = new Set(rows.flatMap(row => row.type === "turn/input/accepted" && row.data.clientRequestId ? [row.data.clientRequestId] : []));
+    const taken = db.prepare("SELECT 1 FROM optchat_log WHERE bot_id=? AND event_key=?");
+    return rows.flatMap(row => row.type === "client/turn/requested" && row.data.target?.kind === "steer" && row.data.requestId && !accepted.has(row.data.requestId) && taken.get(bot, `${row.data.requestId}:input`) ? [row.data.requestId] : []);
+  }
   bb.agents.registerTool({
     name: "optbot_chat", description: "Private OptBot runtime persistence protocol. Managed by the harness; not an agent-facing memory editing tool.",
     parameters: chatSchema,
@@ -118,6 +135,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
         case "input": result=chat.input(bot,ctx.threadId,lease(),required(input.requestId,"requestId"),required(input.text,"text"));break;
         case "enqueue": result=chat.enqueue(bot,ctx.threadId,required(input.requestId,"requestId"),required(input.parentId,"parentId"),required(input.text,"text"));break;
         case "work": result = chat.work(bot, ctx.threadId, lease()); break;
+        case "unacknowledged": result = await unacknowledged(bot, ctx.threadId); break;
         case "merge": result = chat.merge(bot, ctx.threadId, lease(), required(input.start, "start"), required(input.count, "count"), required(input.text, "text")); break;
         case "view": result = chat.view(bot); break;
         case "zoom": result=chat.zoomText(bot,required(input.start,"start"),required(input.count,"count"),input.at??0); break;
