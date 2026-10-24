@@ -11,11 +11,12 @@ export const AGENT_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] a
 // A task is its text, or {title, task}: the title names the agent's thread in the sidebar (else its first line).
 const spawnTask = z.union([z.string().min(1), z.object({ title: z.string().min(1).max(80), task: z.string().min(1) }).strict()]);
 // What a subagent starts from: its task alone (the default), or the bot's view too. The view is the user's whole chat,
-// all of their work: a task that doesn't build on it gets none of it, and no memory tool to reach it.
+// all of their work: a task that doesn't build on it starts without it. Every subagent keeps the memory tool, so a
+// task can point it at the messages it needs.
 export const AGENT_CONTEXTS = ["task", "view"] as const;
 export const spawnInput = z.object({ tasks: z.array(spawnTask).min(1).max(16), effort: z.enum(AGENT_EFFORTS).optional(), context: z.enum(AGENT_CONTEXTS).optional() }).strict();
 export const tellInput = z.object({ agent: z.string().min(1).max(64), message: z.string().min(1) }).strict();
-export const SPAWN_DESCRIPTION = "Start one subagent per task, in parallel, and return each one's thread id at once; an agent is known by its thread id. Give each task a short title, as {title, task}: it names the agent's thread in the user's sidebar. Each one's report reaches you as a message \"[thread id] report\" when it finishes. By default a subagent sees only its task, not the view, and cannot read your memory: write each task so it stands alone. Pass context \"view\" only when the tasks build on this chat's work; then they also see the view and can zoom it.";
+export const SPAWN_DESCRIPTION = "Start one subagent per task, in parallel, and return each one's thread id at once; an agent is known by its thread id. Give each task a short title, as {title, task}: it names the agent's thread in the user's sidebar. Each one's report reaches you as a message \"[thread id] report\" when it finishes. By default a subagent starts from its task alone, not the view: write each task so it stands alone, and name the messages it may need by id (\"the spec is message 16437\"); it can zoom your memory to read them. Pass context \"view\" only when the tasks need the whole picture of this chat's work.";
 export const TELL_DESCRIPTION = "Send a message to an agent, by its thread id. One at work reads it between its tool calls, and its report answers it; an idle one goes on from its chat, and its reply reaches you as a message \"[thread id] reply\".";
 
 // UniiChat SUB_HEAD and its VIEW_DOC, with Unii renamed OptBot and OptBot's memory tool syntax; no devices. The bot's
@@ -25,14 +26,25 @@ const SUB_HEAD = `You are a subagent of OptBot, an AI agent that works for one u
 single chat that never ends. OptBot gave you a task. Do it yourself, with
 your tools; don't hand it to other threads or agents.`;
 
-/** A subagent on its task alone: no view, and no memory tool. */
+const MEMORY_DOC = `Navigating: optbot_memory({action: "zoom", start: id, count: n}) opens line id+n into the two lines of n/2
+messages it was made from; count 1 gives message id in full. Zoom whenever a summary
+only mentions something you need, such as what your last reply said, a
+decision, a past attempt or where a file is, before you act, guess or
+ask. optbot_memory({action: "date", start: id}) gives the date and time of message id.
+optbot_memory({action: "zoom", agent: "thr_…"}) gives an agent's whole chat.`;
+
+/** A subagent on its task alone: no view, but the memory tool, for the messages its task points to. */
 export const SUB_TASK_PROMPT = `${SUB_HEAD}
 
 Your first message holds your chat with OptBot so far, its lines as
-"i|kind: text": what you are (note) and your task (user). Your task is all
-you know of the user's chat: don't look for more. Your final reply is your
-report to OptBot. OptBot may send you more messages, even while you work:
-answer the last.`;
+"i|kind: text": what you are (note) and your task (user), and later all you
+did and were told. You don't see the user's chat with OptBot, only your
+task. When your task points to messages of that chat by id, read them with
+optbot_memory({action: "zoom", start: id, count: 1}); a message's
+neighbours are id-1 and id+1. Read what your task points to, and what that
+in turn points to; don't browse the rest of the chat. Your final reply is
+your report to OptBot. OptBot may send you more messages, even while you
+work: answer the last.`;
 
 export const SUB_PROMPT = `${SUB_HEAD}
 
@@ -58,12 +70,7 @@ A message not summarized yet shows as "(not summarized yet: zoom it)".
 No message appears in full, not even the last ones. A text too long for
 one message is split over several in a row.
 
-Navigating: optbot_memory({action: "zoom", start: id, count: n}) opens line id+n into the two lines of n/2
-messages it was made from; count 1 gives message id in full. Zoom whenever a summary
-only mentions something you need, such as what your last reply said, a
-decision, a past attempt or where a file is, before you act, guess or
-ask. optbot_memory({action: "date", start: id}) gives the date and time of message id.
-optbot_memory({action: "zoom", agent: "thr_…"}) gives an agent's whole chat.`;
+${MEMORY_DOC}`;
 
 const SUB_NOTE = "subagent", SUB_AT = " at effort ";
 /** UniiChat Call.ts report_text, with OptBot's zoom syntax. */
@@ -71,7 +78,7 @@ export function reportText(agent: string, text: string) { return `[${agent}]\n${
 // An agent is known by its thread id; older reports used a two-word name (SteadyCobra) and still match.
 export const REPORT = /^\[(thr_[A-Za-z0-9]+|[A-Z][a-z]+[A-Z][a-z]+)\]\n[\s\S]*\n\nFull chat: optbot_memory\(\{action: "zoom", (?:agent|name): "\1"\}\)$/;
 
-type Row = { bot: string; name: string; thread: string; conversation: string; cursor: string | null; status: string; context: string | null };
+type Row = { bot: string; name: string; thread: string; conversation: string; cursor: string | null; status: string };
 type Deps = {
   view(bot: string): string;
   worker(threadId: string): { bot: string; parent: string; model: string | null; reasoning: string | null } | null;
@@ -81,8 +88,6 @@ type Deps = {
 export function createAgents(bb: BbPluginApi, deps: Deps) {
   const db = bb.storage.database();
   db.exec(`CREATE TABLE IF NOT EXISTS optbot_agents (bot TEXT NOT NULL, name TEXT NOT NULL, thread TEXT NOT NULL UNIQUE, conversation TEXT NOT NULL, cursor TEXT, status TEXT NOT NULL, PRIMARY KEY(bot, name));`);
-  // Agents from before contexts saw the view: a missing context is "view".
-  if (!(db.prepare("PRAGMA table_info(optbot_agents)").all() as { name: string }[]).some(column => column.name === "context")) db.exec("ALTER TABLE optbot_agents ADD COLUMN context TEXT");
   const byName = (bot: string, name: string) => db.prepare("SELECT * FROM optbot_agents WHERE bot=? AND name=?").get(bot, name) as Row | undefined;
   const byThread = (thread: string) => db.prepare("SELECT * FROM optbot_agents WHERE thread=?").get(thread) as Row | undefined;
   type Event = { seq: number; type: string; data: { item?: unknown; input?: { type: string; text?: string }[]; status?: string; error?: { message?: string } } };
@@ -137,7 +142,7 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
         pluginMetadata: { optbotAgent: "subagent", optbotContext: context },
       } as Parameters<typeof bb.sdk.threads.spawn>[0]);
       // An agent is known by its BB thread id: no made-up name.
-      db.prepare("INSERT INTO optbot_agents (bot,name,thread,conversation,cursor,status,context) VALUES (?,?,?,?,NULL,'active',?)").run(owner.bot, thread.id, thread.id, owner.parent, context);
+      db.prepare("INSERT INTO optbot_agents (bot,name,thread,conversation,cursor,status) VALUES (?,?,?,?,NULL,'active')").run(owner.bot, thread.id, thread.id, owner.parent);
       started.push(`${thread.id}: ${title}`);
     }
     return `Started:\n${started.join("\n")}\nEach one's report will reach you as a message when it finishes.`;
@@ -194,5 +199,5 @@ export function createAgents(bb: BbPluginApi, deps: Deps) {
     await bb.sdk.threads.send({ threadId: row.thread, mode: "auto", input: [{ type: "text", text, mentions: [] }] } as Parameters<typeof bb.sdk.threads.send>[0]);
   }
 
-  return { spawn, tell, chat, recover, goOn, isAgent: (threadId: string) => byThread(threadId) !== undefined, taskOnly: (threadId: string) => byThread(threadId)?.context === "task", name: (threadId: string) => byThread(threadId)?.name ?? null };
+  return { spawn, tell, chat, recover, goOn, isAgent: (threadId: string) => byThread(threadId) !== undefined, name: (threadId: string) => byThread(threadId)?.name ?? null };
 }
