@@ -15,7 +15,7 @@ const SUMMARY_CALL_TIMEOUT_MS = 300_000;
 const summarizerRef = (model: string) => /^bb\/(claude-code|pi)(\/|$)/.test(model) ? cliRef(model) : codexRef(model);
 import type { createBbWorkers } from "./bb-workers";
 
-export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined, agents?: { chat(bot: string, name: string): Promise<string | null>; name(threadId: string): string | null }) {
+export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: string) => Promise<string | null>, workers: ReturnType<typeof createBbWorkers>, rules?: (bot: string) => string | undefined, agents?: { chat(bot: string, name: string): Promise<string | null>; taskOnly?(threadId: string): boolean; name(threadId: string): string | null }) {
   const db = bb.storage.database();
   const root=join(dirname(db.name),"chat");
   const archive = await openArchive(root, message=>bb.log.warn(message));
@@ -151,6 +151,8 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     name: "optbot_memory", description: "zoom: Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. With an agent's thread id, give that agent's whole chat. A long text comes in pages from character at, saying where to go on. date: The date and time of message id.",
     parameters: z.object({ action: z.enum(["zoom", "date"]), start: z.number().int().nonnegative().optional(), count: z.number().int().positive().optional(), agent: z.string().min(1).max(64).optional(), name: z.string().min(1).max(64).optional(), at: z.number().int().nonnegative().optional() }).strict(),
     async execute(input, ctx) {
+      // A subagent spawned on its task alone reads none of the bot's memory.
+      if (agents?.taskOnly?.(ctx.threadId)) return "You work from your task alone: OptBot's memory is not open to you.";
       const bot = await scope(ctx.threadId);
       // UniiChat Tools.ts: zoom with an agent's name gives its whole chat, in pages.
       // `name` is the older form, from reports logged when agents had two-word names.

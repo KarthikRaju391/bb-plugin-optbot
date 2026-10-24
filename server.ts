@@ -227,7 +227,7 @@ export default async function plugin(bb: BbPluginApi) {
   // A bot's rules follow the system prompt in its summaries too, as in its turns (UniiChat Tools.system).
   const rules = (bot: string) => { const value = store.get(bot); return value ? botInstructions(value) : undefined; };
   let agents: ReturnType<typeof createAgents> | null = null;
-  const optchat=await registerOptChat(bb, resolveOwner, workers, rules, { chat: async (bot, name) => agents ? await agents.chat(bot, name) : null, name: threadId => agents?.name(threadId) ?? null });
+  const optchat=await registerOptChat(bb, resolveOwner, workers, rules, { chat: async (bot, name) => agents ? await agents.chat(bot, name) : null, name: threadId => agents?.name(threadId) ?? null, taskOnly: threadId => agents?.taskOnly(threadId) ?? false });
   workers.setLiveTurnProbe(threadId => optchat.liveTurn(threadId));
   // Subagents (UniiChat spawn/tell): visible BB threads under the bot's conversation, reporting back as `work`.
   agents = createAgents(bb, { view: bot => { optchat.hydrate(bot); return optchat.view(bot).text; }, worker: threadId => workers.workerOf(threadId), nativeEvents: item => nativeEvents(item as Parameters<typeof nativeEvents>[0]) });
@@ -240,7 +240,7 @@ export default async function plugin(bb: BbPluginApi) {
     // The worker prompt carries the full instructions; BB truncates configured ones.
     if (worker) return { tools: worker.role === "master" ? ["optbot_read_state", "optbot_update_state", "optbot_memory", "optbot_spawn", "optbot_tell"] : [], skills: [] };
     // An agent's thread: its row may not exist yet on the first configure, so the spawn's metadata counts too.
-    if (typeof ctx.pluginMetadata.optbotAgent === "string" || subagents.isAgent(ctx.thread.id)) return { tools: ["optbot_memory"], skills: [] };
+    if (typeof ctx.pluginMetadata.optbotAgent === "string" || subagents.isAgent(ctx.thread.id)) return { tools: ctx.pluginMetadata.optbotContext === "task" || subagents.taskOnly(ctx.thread.id) ? [] : ["optbot_memory"], skills: [] };
     const botId = contextOwner(ctx);
     const bot = botId ? store.get(botId) : null;
     return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory", "optbot_worker"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
