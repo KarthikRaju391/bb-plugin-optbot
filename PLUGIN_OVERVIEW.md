@@ -9,6 +9,8 @@ OptBot is an extension of [Bots Sidebar](https://github.com/tobi/bb-bots-sidebar
 - Corrections stick: your own words rank first when history is summarized, so the latest decision is what the bot remembers.
 - Switch the model in the conversation's composer at any time; the next turn uses it and keeps the memory.
 - Edit bot → Memory shows the history, the summary tree and the current view, and how each summary was merged.
+- Subagents on request: a bot splits work across BB threads under its conversation, titled with their tasks, and each one's report reaches the bot as soon as it finishes. The bot never polls.
+- A BB restart loses nothing: each cut turn, and each cut subagent, goes on once BB is back.
 
 ## How it works
 

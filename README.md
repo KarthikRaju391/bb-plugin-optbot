@@ -93,20 +93,54 @@ bb plugin config optbot set compactorExecutable /absolute/path/to/pi
 - **Orchestrate:** a bot can run the `bb` CLI, so it can start and manage BB
   threads when you ask. Threads it starts are ordinary sidebar threads.
 
+## Subagents
+
+When you ask for it, a bot splits work across subagents (`optbot_spawn`). Each
+subagent is an ordinary BB thread under the conversation that started it, titled
+with its task, on the same provider and model, and known by its thread ID. The
+bot never waits for one: when a subagent finishes, fails or is interrupted, BB
+tells the conversation, and the bot's memory logs that notice as the agent's
+report (`work`, starting `[thr_…]`). The bot can message a running or finished
+subagent (`optbot_tell`) and read its whole chat from its BB thread.
+
+A subagent starts from its task alone, without the bot's memory, so a side task
+never sees the rest of your work. The bot passes its view along only when the
+tasks build on the conversation.
+
+Each turn runs in a hidden thread that is closed when the turn ends, which would
+cut off a provider's own subagents. Turn on BB's **Disable provider subagents**
+setting for Codex and Claude Code (and **Disable Workflow tool** for Claude Code)
+so all delegation goes through OptBot's subagents:
+
+```sh
+bb plugin config provider-codex set subagentsDisabled true
+bb plugin config provider-claude-code set subagentsDisabled true
+bb plugin config provider-claude-code set workflowsDisabled true
+```
+
+These settings apply to every Codex and Claude Code thread, not only OptBot's.
+
+## After a restart
+
+A BB restart cuts the turns running at the time. Once BB is back, each cut turn
+starts again with "The server restarted, cutting OptBot's turn; nothing was lost:
+go on.", and subagents the restart cut are told the same. Nothing you sent is
+lost: messages that waited on the cut turn are kept in order.
+
 ## How the memory works
 
 Each bot has one memory, shared by all of its conversations and isolated from
-other bots. It follows the current OptChat specification (renamed UniiChat in its
-2026-10-08 revision):
+other bots. It follows UniiChat's source
+([VictorTaelin/UniiChat](https://github.com/VictorTaelin/UniiChat), formerly OptChat):
 
 1. **The log.** Every user message, reply, tool call, tool result and report from
-   another thread or bot (`work`, starting `[Name]`) is appended to daily JSONL
+   another thread, bot or subagent (`work`, starting `[sender]`) is appended to daily JSONL
    files and never edited. Tool results keep 30,000 characters (start and end);
    any other longer text is logged as several messages in a row.
 2. **The tree.** In the background, each message is compressed into a line of at
    most 512 bytes, and adjacent lines are merged pairwise into a binary tree. A
-   message or pair that fits in 512 bytes is its own line, word for word. Up to 8
-   summaries run at once.
+   message or pair that fits in 512 bytes is its own line, word for word. Up to 64
+   summaries per bot run at once (8 in total through a CLI summarizer).
 3. **The view.** Every turn sees the whole history as summary lines, recent ones
    fine and old ones coarse. Each new message appends a line; once the view passes
    128 KB, one batch merges the most due pairs (Taelin's rollback-push order) down
