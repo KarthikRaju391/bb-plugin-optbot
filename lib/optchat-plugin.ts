@@ -77,7 +77,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     return botId;
   }
   bb.providers.register({
-    id: "optbot", displayName: "OptBot", icon: "./assets/bot.svg", family: "optbot",
+    id: "optbot", displayName: "OptBot", icon: "./assets/optbot.svg", family: "optbot",
     // Listed only where "installed"; the bridge always answers not_installed, so OptBot stays out of
     // BB's global picker while its own conversations keep their composer and catalog.
     experimental_visibility: "installed",

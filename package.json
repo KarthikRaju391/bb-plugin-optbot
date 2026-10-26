@@ -2,6 +2,7 @@
   "name": "bb-plugin-optbot",
   "version": "0.1.0",
   "description": "OptBot extends Bots Sidebar: each bot remembers its whole conversation history as an OptChat summary tree and starts every turn fresh.",
+  "license": "MIT",
   "author": "Karthik Raju (https://github.com/KarthikRaju391)",
   "repository": {
     "type": "git",
@@ -23,7 +24,7 @@
     "name": "OptBot",
     "description": "Extends Bots Sidebar: each bot keeps its whole conversation history as an OptChat summary tree and starts every turn fresh from it.",
     "branding": {
-      "icon": "./assets/bot.svg"
+      "icon": "./assets/optbot.svg"
     },
     "server": "./server.ts",
     "host": "./host.ts",

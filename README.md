@@ -207,3 +207,5 @@ See [AGENTS.md](AGENTS.md) for the contracts the code keeps.
   by Victor Taelin; the summarizer and system prompts are taken from it verbatim.
 - Avatar shapes adapted from [bloub](https://github.com/jeremy-prt/bloub) (MIT);
   see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+OptBot is released under the [MIT License](LICENSE).
