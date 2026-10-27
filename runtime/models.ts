@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { AgentTool, ModelBoundary, ModelEvent, ModelOptions } from "./turn";
-import { SPEC_SYSTEM, TURN_HEAD } from "./prompts";
+import { SPEC_SYSTEM, splitTurn } from "./prompts";
 import { cacheBlocks as cacheView, capResult as capToolResult, singleFlight, type TextBlock } from "./cache";
 import {providerPayload} from "./response";
 import { codexModel } from "./codex";
@@ -102,10 +102,8 @@ export function createApiModel(network?:ApiFetch):ModelBoundary {
   return {
     async *stream(prompt,options) {
       if (options.model.startsWith("bb/")) { yield* codexModel.stream(prompt, options); return; }
-      // The view's lines hold no newlines, so "</chat>\n" + the turn head first occurs where the view ends.
-      const start=prompt.indexOf("<chat>\n"), close=prompt.indexOf("</chat>\n"+TURN_HEAD,start);
-      if(start<0||close<start) throw new Error("Invalid OptChat turn layout");
-      const split=close+"</chat>\n".length, view=prompt.slice(start,split);let input=prompt.slice(split+TURN_HEAD.length);
+      // The view is cached; this conversation's block and the message follow it uncached.
+      const parts=splitTurn(prompt), view=parts.view;let input=parts.local+parts.message;
     for(const message of options.incoming?.()??[]){yield {kind:"user",id:message.id,text:message.text};input+="\n\n"+message.text;}
       const thoughts:Extract<ModelEvent,{kind:"thought"}>[]=[];let wake:(()=>void)|undefined;
       const conversation=apiConversation([...cacheView(view),{text:input,cache:false}],{...options,system:`${SPEC_SYSTEM}\n\n${options.instructions}`,onThought:(id,text)=>{thoughts.push({kind:"thought",id,text});wake?.();}},network);

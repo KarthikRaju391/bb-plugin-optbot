@@ -106,6 +106,32 @@ export const SYSTEM = SPEC_SYSTEM
 /** What follows the view in a turn, before the message whole (UniiChat Server.ts). */
 export const TURN_HEAD = "Turn: the user's new message:\n\n";
 
+/**
+ * OptBot, not UniiChat: a bot's conversations share one memory, so the view interleaves them and "the latest lines" may
+ * belong to another conversation. Between the view and the message, a turn gets its own conversation's latest messages.
+ */
+export const LOCAL_HEAD = "This conversation: your other conversations share this memory, so the view interleaves them. These are this conversation's latest messages, oldest first; the user's new message continues them, so read what it refers to (this, that, the fix) here before the rest of the view.\n";
+export const LOCAL_NEW = "This conversation: it has no earlier messages. The view holds your other conversations; the user's new message is not about them unless it says so.\n";
+export function localBlock(lines: string[] | null) {
+  if (lines === null) return "";
+  return lines.length ? `${LOCAL_HEAD}<conversation>\n${lines.join("\n")}\n</conversation>\n\n` : `${LOCAL_NEW}\n`;
+}
+/** A turn's prompt: the view, this conversation's block (if any), then the message. */
+export function turnPrompt(view: string, local: string, message: string) { return `${view}${local}${TURN_HEAD}${message}`; }
+/** The parts of a turnPrompt: the view (cached), then what the turn adds: the conversation block and the message. */
+export function splitTurn(prompt: string) {
+  const start = prompt.indexOf("<chat>\n");
+  // The view's lines hold no newlines, so "</chat>\n" and what follows a view first occur where it ends.
+  let close = -1;
+  for (const next of [LOCAL_HEAD, LOCAL_NEW, TURN_HEAD]) { const at = prompt.indexOf("</chat>\n" + next, start); if (at >= 0 && (close < 0 || at < close)) close = at; }
+  if (start < 0 || close < start) throw new Error("Invalid OptChat turn layout");
+  const split = close + "</chat>\n".length, rest = prompt.slice(split);
+  const local = rest.startsWith(LOCAL_HEAD) ? rest.slice(0, rest.indexOf("</conversation>\n\n") + "</conversation>\n\n".length) : rest.startsWith(LOCAL_NEW) ? LOCAL_NEW + "\n" : "";
+  const after = rest.slice(local.length);
+  if (!after.startsWith(TURN_HEAD)) throw new Error("Invalid OptChat turn layout");
+  return { view: prompt.slice(start, split), local, message: after.slice(TURN_HEAD.length) };
+}
+
 const RULER = "-".repeat(512);
 /** §4, verbatim: the task after the compaction's view. */
 export function compactionTask(task: { start: number; count: number; source: string; children?: string[] }) {

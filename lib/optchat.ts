@@ -439,6 +439,25 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       saveNode(bot, start, size, text); refit(bot, false);
       return { ok: true };
     }),
+    /**
+     * This conversation's latest messages as "i|kind: text" lines, for a turn whose view interleaves the bot's other
+     * conversations: null when nothing interleaves (the view's latest lines are this conversation), [] for a new
+     * conversation of a bot with other history.
+     */
+    local(bot: string, threadId: string, maxEntries = 12, maxChars = 12_000, entryChars = 1_500) {
+      const mine = db.prepare("SELECT idx,kind,text FROM optchat_log WHERE bot_id=? AND thread_id=? AND kind IN ('user','talk','work') ORDER BY idx DESC LIMIT ?").all(bot, threadId, maxEntries) as { idx: number; kind: string; text: string }[];
+      const since = mine.length ? mine[mine.length - 1]!.idx : -1;
+      const others = db.prepare("SELECT 1 FROM optchat_log WHERE bot_id=? AND thread_id<>? AND idx>? LIMIT 1").get(bot, threadId, since);
+      if (!others) return null;
+      const lines: string[] = []; let used = 0;
+      for (const row of mine) {
+        const text = flatLine(row.text), clipped = text.length > entryChars ? `${text.slice(0, entryChars)}… (zoom ${row.idx}+1 for the rest)` : text;
+        const line = `${row.idx}+1|${row.kind}: ${clipped}`;
+        if (lines.length && used + line.length > maxChars) break;
+        lines.push(line); used += line.length;
+      }
+      return lines.reverse();
+    },
     view(bot: string) {
       const text = chatText(bot, parts(bot));
       const summaryBytes=parts(bot).reduce((sum,part)=>sum+(nodeBytes(bot,part)??0),0);

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { clipPage, createOptChat } from "./optchat";
 import { openArchive } from "./archive";
+import { localBlock } from "../runtime/prompts";
 import { dirname, join } from "node:path";
 import { acquireCompactor, compactNode } from "./compactor";
 import { modelRef } from "../runtime/models";
@@ -137,7 +138,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
         case "work": result = chat.work(bot, ctx.threadId, lease()); break;
         case "unacknowledged": result = await unacknowledged(bot, ctx.threadId); break;
         case "merge": result = chat.merge(bot, ctx.threadId, lease(), required(input.start, "start"), required(input.count, "count"), required(input.text, "text")); break;
-        case "view": result = chat.view(bot); break;
+        case "view": result = { ...chat.view(bot), local: localBlock(chat.local(bot, ctx.threadId)) }; break;
         case "zoom": result=chat.zoomText(bot,required(input.start,"start"),required(input.count,"count"),input.at??0); break;
         case "date": result=chat.dateText(bot,required(input.start,"start")); break;
         case "finish": result = chat.finish(bot, ctx.threadId, lease(), required(input.status, "status"), required(input.text, "text")); break;

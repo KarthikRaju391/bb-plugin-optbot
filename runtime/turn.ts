@@ -1,4 +1,4 @@
-import { TURN_HEAD } from "./prompts";
+import { turnPrompt } from "./prompts";
 import { randomUUID } from "node:crypto";
 import type { Compression, MemoryKind } from "../lib/optchat";
 import type {PluginProviderReasoningLevel} from "@get-bb/plugin-sdk";
@@ -86,14 +86,15 @@ export async function runOptChatTurn(args: {
       args.onEvent({ kind: "talk", id: `recovered:${args.requestId}`, text: begin.answer });
       return begin.answer;
     }
-    let view = await call({ action: "view", lease }) as { text: string };
+    let view = await call({ action: "view", lease }) as { text: string; local?: string };
     await call({ action: "input", lease, requestId:args.requestId, text: args.input });
     let request = args.input, result: string | undefined;
     for (let round = 0; ; round++) {
       result = undefined;
       let lastTalk = "";
-      // UniiChat Server.ts: the view, then "Turn: the user's new message:" and the message whole.
-      for await (const event of model.stream(`${view.text}${TURN_HEAD}${request}`, options)) {
+      // UniiChat Server.ts: the view, then "Turn: the user's new message:" and the message whole; OptBot puts this
+      // conversation's latest messages in between when the view interleaves other conversations.
+      for await (const event of model.stream(turnPrompt(view.text, view.local ?? "", request), options)) {
         check();
         if (event.kind === "result") {
           if (!event.success) throw new Error(event.text || "Model turn failed");
@@ -120,7 +121,7 @@ export async function runOptChatTurn(args: {
       if (!left.length) break;
       check();
       await settle();
-      view = await call({ action: "view", lease }) as { text: string };
+      view = await call({ action: "view", lease }) as { text: string; local?: string };
       for (const message of left) { await call({ action: "input", lease, requestId: message.id, text: message.text }); args.onEvent({ kind: "user", ...message }); }
       request = left.map(message => message.text).join("\n\n");
     }
