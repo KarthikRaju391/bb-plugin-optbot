@@ -139,6 +139,17 @@ export function compactionTask(task: { start: number; count: number; source: str
   const half = task.count / 2, [a, b] = (task.children ?? task.source.split("\n")).map(line => line.replace(/\r\n|\n|\r/g, " "));
   return `Compaction: merge lines ${task.start}+${half} and ${task.start + half}+${half}, adjacent, into one line of at most\n512 bytes (about 70 words), the length of this ruler:\n${RULER}\n<chat> may hold their messages, ${task.start} to ${task.start + task.count - 1}, in more detail: take details\nof them from there too.\n<input>\n${a}\n${b}\n</input>`;
 }
+/**
+ * OptBot, not UniiChat: a CLI summarizer starts a whole process per call, so it gets many compactions in one call,
+ * each the §4 task as asked alone (a line too long carries its note), answered one `id+n|line` per task.
+ */
+export function batchTask(items: readonly { task: { start: number; count: number; source: string; children?: string[] }; note?: string }[]) {
+  const blocks = items.map(({ task, note }) => {
+    const body = compactionTask(task).replace(/\(about 70 words\), the length of this ruler:\n-+\n/, "(about 70 words).\n");
+    return `<task id="${task.start}+${task.count}">\n${body}${note ? `\n${note}` : ""}\n</task>`;
+  });
+  return `Compaction batch: ${items.length} separate compactions follow, each in <task id="id+n">. Do each one as if it\nwere asked alone: the same rules, and one line of at most 512 bytes for each, the length of this ruler:\n${RULER}\nEach line covers its own <input> only; other tasks' inputs are context, like <chat>.\nOutput exactly ${items.length} lines, one per task, in the order given, and nothing else. Start each with its\ntask's id and "|", e.g. "${items[0] ? `${items[0].task.start}+${items[0].task.count}` : "0+1"}|user: ...": the id is the only head; the rest is the line.\n\n${blocks.join("\n")}`;
+}
 /** UniiChat Memory.over, verbatim: the note a try after a line too long adds. */
 export function tooLong(size: number, cut: string) {
   return `Too long: your last line for this <input> was ${size} bytes,\nover the 512-byte limit. Write the whole line again, cutting just\nenough of the least valuable items to fit before this cut:\n${cut}| ← LIMIT`;

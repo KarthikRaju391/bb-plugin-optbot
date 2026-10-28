@@ -40,7 +40,7 @@ export function cliConversation(blocks: { text: string }[], options: ApiOptions)
     const { cli, model } = cliRef(options.model), { bin, env, args } = invocation(cli, model, options.system);
     const executable = options.env[env] || await experimental_resolveExecutablePath(bin);
     if (!executable) throw new Error(`Install and sign into ${bin} on this BB machine; no API key is required.`);
-    const timeoutMs = Number(options.env.OPTBOT_SUMMARY_TIMEOUT_MS) || CLI_CALL_TIMEOUT_MS;
+    const timeoutMs = Number(options.env.OPTBOT_SUMMARY_TIMEOUT_MS) || options.timeoutMs || CLI_CALL_TIMEOUT_MS;
     return new Promise<string>((resolve, reject) => {
       // Its own process group, so a wrapper and everything it started are stopped together.
       const child = spawn(executable, args, { env: options.env, stdio: ["pipe", "pipe", "pipe"], detached: true });

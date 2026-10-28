@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { modelHostContract } from "./runtime/host-contract";
-import { compactOnHost } from "./runtime/host-compact";
+import { compactBatchOnHost, compactOnHost } from "./runtime/host-compact";
 import { TRANSIENT_NETWORK } from "./runtime/transient";
 import {lstat,readFile} from "node:fs/promises";
 import {join} from "node:path";
@@ -275,6 +275,9 @@ export default experimental_defineHostEntry({
   handlers: {
     async compact(input, context) {
       return compactOnHost(input, AbortSignal.any([context.signal, context.lifecycle.signal]));
+    },
+    async compactBatch(input, context) {
+      return compactBatchOnHost(input, AbortSignal.any([context.signal, context.lifecycle.signal]));
     },
   },
 });

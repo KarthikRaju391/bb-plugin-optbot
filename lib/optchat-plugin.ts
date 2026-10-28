@@ -4,7 +4,7 @@ import { clipPage, createOptChat } from "./optchat";
 import { openArchive } from "./archive";
 import { localBlock } from "../runtime/prompts";
 import { dirname, join } from "node:path";
-import { acquireCompactor, compactNode } from "./compactor";
+import { acquireCompactor, compactBatch, compactNode, CLI_JOBS } from "./compactor";
 import { modelRef } from "../runtime/models";
 import { modelHostContract } from "../runtime/host-contract";
 import { codexRef } from "../runtime/codex";
@@ -30,6 +30,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     compactorAccountPooler:{type:"boolean",label:"Summarize through Account Pooler (unsupported by BB)",default:false,description:"Lets OptBot read Account Pooler's machine token from BB's data folder to send summaries through its local proxy, which switches accounts like BB does. Then set compactorModel to pool/claude/<model> (e.g. pool/claude/claude-haiku-4-5) or pool/codex/<model>. Account Pooler does not offer this to plugins officially; it may break in a future BB release."},
     compactorApiKey:{type:"string",label:"Compactor API key",secret:true,description:"Used only by the always-on backend; never sent to the agent or stored in its history."},
     compactorEndpoint:{type:"string",label:"Optional compactor API base URL",description:"Leave empty for the provider's standard endpoint. HTTPS is required except on loopback."},
+    compactorJobs:{type:"number",label:"Summarizer processes at once",default:CLI_JOBS,description:"How many summarizer CLI calls (claude, codex, pi) may run at once across all bots, 1 to 8. Each call summarizes up to 32 messages or merges and holds about 230 MB while it runs."},
   });
 
   const nativeLifetime=new AbortController();
@@ -51,13 +52,21 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     if (pooled===true && /^bb\/claude-code(\/|$)/.test(model)) extra.poolToken=(await poolCredentials(bb.server.experimental_dataDir,bb.server.loopbackBaseUrl,typeof host==="string"&&host?host:undefined)).OPTBOT_POOL_TOKEN;
     return extra;
   }
-  const worker=await acquireCompactor(root,{chat,rules,report:message=>bb.log.warn(message),async compact(task,options){
+  // The compactorJobs setting as last read (each summary reads the settings; pumps need it synchronously).
+  let cliJobs=CLI_JOBS;
+  const worker=await acquireCompactor(root,{chat,rules,report:message=>bb.log.warn(message),jobs:()=>cliJobs,async compactBatch(items,context,options){
+    if (!options.model.startsWith("bb/")) return compactBatch(items, context, options);
+    summarizerRef(options.model);
+    // The batch's one context goes once; its items' own contexts (prefixes of it) stay here.
+    return modelHost.call("compactBatch",{model:options.model,items:items.map(item=>({task:{...item.task,context:""},...(item.note?{note:item.note}:{})})),context,...(options.system?{rules:options.system}:{}),...await executable(options.model)},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
+  },async compact(task,options){
     if (!options.model.startsWith("bb/")) return compactNode(task, options);
     summarizerRef(options.model);
     // One summary can take several model attempts; BB's default 30 s host-call deadline cut them off.
     return modelHost.call("compact",{task,model:options.model,...(options.system?{rules:options.system}:{}),...await executable(options.model)},{hostId:await nativeHostId(),signal:options.signal,timeoutMs:SUMMARY_CALL_TIMEOUT_MS});
   },async options(signal){
-    const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base}=await settings.get();
+    const {compactorModel:selected,compactorApiKey:credential,compactorEndpoint:base,compactorJobs:jobs}=await settings.get();
+    if(typeof jobs==="number"&&Number.isFinite(jobs))cliJobs=Math.max(1,Math.min(8,Math.floor(jobs)));
     const model=typeof selected==="string"&&selected?selected:"bb/codex";
     if(model.startsWith("bb/")) {summarizerRef(model);return {model,env:{},signal,system:""};}
     if(model.startsWith("pool/")) return {model,env:await poolEnv(model),signal,system:""};

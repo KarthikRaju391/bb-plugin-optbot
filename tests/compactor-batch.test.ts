@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createOptChat, NODE_BYTES } from "../lib/optchat";
 import { acquireCompactor } from "../lib/compactor";
+import { modelHostContract } from "../runtime/host-contract";
+import { compactBatchOnHost } from "../runtime/host-compact";
 
 /**
  * The compactor against a fake `claude` binary at the process boundary: it reads the prompt on stdin and prints its
@@ -28,7 +30,7 @@ process.stdin.on("end", async () => {
   const hang = blocks.some(b => (plan.hangOnce || []).includes(b.id) && once("hang", b.id));
   if (hang) { setInterval(() => {}, 1000); return; }
   await new Promise(r => setTimeout(r, Number(process.env.FAKE_DELAY_MS || 60)));
-  const line = body => { const inp = body.slice(body.lastIndexOf("<input>")); const marks = [...new Set(inp.match(/MSG-\\d+/g) || [])].join(" "); const head = "summary " + marks + " "; return head + "x".repeat(Math.max(0, 300 - head.length)); };
+  const line = body => { const inp = (/<input>\\n([\\s\\S]*?)\\n<\\/input>/.exec(body) || [])[1] || ""; const marks = [...new Set(inp.match(/MSG-\\d+/g) || [])].join(" "); const head = "summary " + marks + " "; return head + "x".repeat(Math.max(0, 300 - head.length)); };
   let out = "";
   if (single) out = line(input);
   else for (const b of blocks) {
@@ -176,5 +178,16 @@ describe("CLI compactor batches summaries", () => {
     const log = calls();
     expect(Math.max(...log.map(call => call.running))).toBeLessThanOrEqual(2);
     expect(log.length).toBeLessThanOrEqual(32);
+  });
+
+  it("the host runs a batch the server sends: the payload passes the RPC contract and lines come back by id", async () => {
+    const { env } = setup({ missingOnce: ["1+1"] });
+    const db = new Database(":memory:"), chat = createOptChat(db);
+    seed(chat, "bot_a", 3);
+    const tasks = chat.available("bot_a", new Set(), 32);
+    // What optchat-plugin sends: each task's context left out, the batch's context once.
+    const input = modelHostContract.compactBatch.input.parse({ model: "bb/claude-code/fake", items: tasks.map(task => ({ task: { ...task, context: "" } })), context: tasks[0]!.context, executable: env.OPTBOT_CLAUDE_EXECUTABLE });
+    const result = modelHostContract.compactBatch.output.parse(await compactBatchOnHost(input, new AbortController().signal, { ...process.env, ...env }));
+    expect(result.lines.map(line => line && /MSG-\d+/.exec(line)![0])).toEqual(["MSG-0", null, "MSG-2"]);
   });
 });

@@ -10,7 +10,7 @@ type JsonObject = Record<string, unknown>;
 const objects = (value: unknown): JsonObject[] => Array.isArray(value) ? value.filter((v): v is JsonObject => Boolean(v) && typeof v === "object" && !Array.isArray(v)) : [];
 const text = (value: unknown) => typeof value === "string" ? value : "";
 const envelope = z.object({ id: z.string(), output: z.array(z.record(z.string(), z.unknown())).optional(), content: z.array(z.record(z.string(), z.unknown())).optional(), status: z.string().optional(), stop_reason: z.string().nullable().optional(), usage: z.unknown().optional() }).passthrough();
-export type ApiOptions = Pick<ModelOptions,"model"|"env"|"signal"|"onUsage"> & { system: string; tools?: AgentTool[]; onThought?:(id:string,text:string)=>void; /** Mark the request's end for the cache (turns); a compaction's task is never marked. */ endMark?: boolean };
+export type ApiOptions = Pick<ModelOptions,"model"|"env"|"signal"|"onUsage"> & { system: string; tools?: AgentTool[]; onThought?:(id:string,text:string)=>void; /** Mark the request's end for the cache (turns); a compaction's task is never marked. */ endMark?: boolean; /** A CLI call's deadline (a batch writes many lines); OPTBOT_SUMMARY_TIMEOUT_MS still wins. */ timeoutMs?: number };
 export type ApiReply = { text: string; thoughts: {id:string;text:string}[]; calls: {id:string;name:string;input:unknown}[] };
 export interface ApiConversation { ask(message?: string): Promise<ApiReply>; addUser(message: string): void; addResult(id: string, result: string, error: boolean): void; close?(): void }
 export type ApiFetch = typeof fetch;

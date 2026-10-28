@@ -1,9 +1,10 @@
 import { sanitizeInheritedChildProcessEnv } from "@get-bb/plugin-sdk/provider-bridge";
-import { compactNode } from "../lib/compactor";
+import { batchTimeout, compactBatch, compactNode, type BatchItem } from "../lib/compactor";
 import type { Compression } from "../lib/optchat";
 
-/** The host side of the compact call: the summarizer CLI runs with the daemon's environment, or the configured binary. */
-export function compactOnHost({ task, model, executable, poolToken, rules }: { task: Compression; model: string; executable?: string; poolToken?: string; rules?: string }, signal: AbortSignal, base: NodeJS.ProcessEnv = process.env) {
+type Login = { model: string; executable?: string; poolToken?: string };
+/** The summarizer CLI's environment on this host: the daemon's, or the configured binary, or Account Pooler. */
+function hostEnv({ model, executable, poolToken }: Login, base: NodeJS.ProcessEnv) {
   const env = sanitizeInheritedChildProcessEnv({ env: base });
   // Account Pooler, set up the way BB sets up a Claude Code thread: the real Claude Code CLI, pointed at
   // the pool's proxy on this machine's BB server, which picks and switches accounts per request.
@@ -15,5 +16,13 @@ export function compactOnHost({ task, model, executable, poolToken, rules }: { t
     env.ANTHROPIC_AUTH_TOKEN = poolToken;
   }
   if (executable) env[/^bb\/claude-code/.test(model) ? "OPTBOT_CLAUDE_EXECUTABLE" : /^bb\/pi/.test(model) ? "OPTBOT_PI_EXECUTABLE" : "OPTBOT_CODEX_EXECUTABLE"] = executable;
-  return compactNode(task, { model, system: rules ?? "", env, signal });
+  return env;
+}
+/** The host side of the compact call: the summarizer CLI runs with the daemon's environment, or the configured binary. */
+export function compactOnHost(input: Login & { task: Compression; rules?: string }, signal: AbortSignal, base: NodeJS.ProcessEnv = process.env) {
+  return compactNode(input.task, { model: input.model, system: input.rules ?? "", env: hostEnv(input, base), signal });
+}
+/** The host side of a batch: one CLI call for many nodes, sharing one context. */
+export function compactBatchOnHost(input: Login & { items: BatchItem[]; context: string; rules?: string }, signal: AbortSignal, base: NodeJS.ProcessEnv = process.env) {
+  return compactBatch(input.items, input.context, { model: input.model, system: input.rules ?? "", env: hostEnv(input, base), signal, timeoutMs: batchTimeout(input.items.length) });
 }
