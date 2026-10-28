@@ -162,8 +162,9 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   db.prepare("UPDATE optbot_workers SET status='cleanup_pending' WHERE worker=?").run(workerId);
   for(let attempt=0;;attempt++)try {
    const thread=await bb.sdk.threads.get({threadId:workerId});
-   if(thread.status!=="idle"&&thread.deletedAt===null)await bb.sdk.threads.stop({threadId:workerId});
-   if(thread.deletedAt===null)await bb.sdk.threads.archive({threadId:workerId});
+   // Archive, then stop even when idle: an archived idle worker keeps its runtime (a claude process, about 275 MB)
+   // for 30 idle minutes, one per turn (bb guide thread-lifecycle). Stop also ends a turn still running.
+   if(thread.deletedAt===null){await bb.sdk.threads.archive({threadId:workerId});await bb.sdk.threads.stop({threadId:workerId});}
    db.prepare("UPDATE optbot_workers SET status='stopped' WHERE worker=?").run(workerId);break;
   } catch(error){if(attempt===2)throw error;await new Promise(resolve=>setTimeout(resolve,100*(attempt+1)));}
  });}
