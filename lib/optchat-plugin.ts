@@ -30,7 +30,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     compactorAccountPooler:{type:"boolean",label:"Summarize through Account Pooler (unsupported by BB)",default:false,description:"Lets OptBot read Account Pooler's machine token from BB's data folder to send summaries through its local proxy, which switches accounts like BB does. Then set compactorModel to pool/claude/<model> (e.g. pool/claude/claude-haiku-4-5) or pool/codex/<model>. Account Pooler does not offer this to plugins officially; it may break in a future BB release."},
     compactorApiKey:{type:"string",label:"Compactor API key",secret:true,description:"Used only by the always-on backend; never sent to the agent or stored in its history."},
     compactorEndpoint:{type:"string",label:"Optional compactor API base URL",description:"Leave empty for the provider's standard endpoint. HTTPS is required except on loopback."},
-    compactorJobs:{type:"number",label:"Summarizer processes at once",default:CLI_JOBS,description:"How many summarizer CLI calls (claude, codex, pi) may run at once across all bots, 1 to 8. Each call summarizes up to 32 messages or merges and holds about 230 MB while it runs."},
+    compactorJobs:{type:"number",label:"Summarizer processes at once",default:CLI_JOBS,description:"How many summarizer CLI calls (claude, codex, pi) may run at once across all bots, 1 to 8. Each call summarizes up to 32 messages or merges and holds about 260 MB while it runs. 2 saves memory but drains a backlog about twice as slowly."},
   });
 
   const nativeLifetime=new AbortController();

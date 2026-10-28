@@ -8,10 +8,11 @@ import { CLI_CALL_TIMEOUT_MS, cliConversation } from "../runtime/cli-summarizer"
 import { poolConversation } from "../runtime/pool-summarizer";
 /**
  * Summaries at once. UniiChat runs 64 per chat (Memory.JOBS), as cheap HTTP calls. A CLI summarizer starts a whole
- * process per call (claude, codex, pi; about 230 MB each), so it gets many nodes per call (a batch) and runs
- * CLI_JOBS batches at once across all bots (the compactorJobs setting).
+ * process per call (claude, codex, pi; about 260 MB each), so it gets many nodes per call (a batch) and runs
+ * CLI_JOBS batches at once across all bots (the compactorJobs setting). Measured on 200 real messages with haiku:
+ * 4 batches at once drained faster than 8 single calls at half their peak memory; 2 used a quarter but took twice as long.
  */
-export const JOBS=64, CLI_JOBS=2, TRIES=5, RETRY_MS=10_000;
+export const JOBS=64, CLI_JOBS=4, TRIES=5, RETRY_MS=10_000;
 /** A batch: at most BATCH_ITEMS nodes and about BATCH_BYTES of their inputs; split over free slots, MIN_BATCH at least. */
 export const BATCH_ITEMS=32, BATCH_BYTES=60_000, MIN_BATCH=8;
 /** A batch call's deadline: a single call's, plus time for each line, within the host call's 300 s. */

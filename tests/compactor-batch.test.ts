@@ -78,14 +78,14 @@ function expectTree(db: Database.Database, bot: string, n: number) {
   }
 }
 async function compactor(root: string, db: Database.Database, chat: ReturnType<typeof createOptChat>, env: Record<string, string>, reports: string[] = []) {
-  const worker = await acquireCompactor(root, { chat, report: message => { reports.push(message); }, retryMs: 200, options: async signal => ({ model: "bb/claude-code/fake", env, signal, system: "" }) } as Parameters<typeof acquireCompactor>[1]);
+  const worker = await acquireCompactor(root, { chat, report: message => { reports.push(message); }, retryMs: 200, jobs: () => 2, options: async signal => ({ model: "bb/claude-code/fake", env, signal, system: "" }) } as Parameters<typeof acquireCompactor>[1]);
   closers.push(() => worker.close());
   return worker;
 }
 function seed(chat: ReturnType<typeof createOptChat>, bot: string, n: number) { chat.importEntries(bot, messages(n)); }
 
 describe("CLI compactor batches summaries", () => {
-  it("compresses a 40-message backlog in a few calls, at most 2 at once, each node mapped to its own messages", async () => {
+  it("compresses a 40-message backlog in a few calls, at most compactorJobs (2 here) at once, each node mapped to its own messages", async () => {
     const { env, calls } = setup();
     const db = new Database(":memory:"), chat = createOptChat(db);
     seed(chat, "bot_a", 40);
@@ -160,7 +160,7 @@ describe("CLI compactor batches summaries", () => {
     db.close();
   });
 
-  it("two bots compacting at once share the 2 CLI slots and both make progress", async () => {
+  it("two bots compacting at once share the CLI slots (2 here) and both make progress", async () => {
     const { env, calls } = setup({}, { FAKE_DELAY_MS: "150" });
     const db = new Database(":memory:"), chat = createOptChat(db);
     seed(chat, "bot_a", 40); seed(chat, "bot_b", 40);
