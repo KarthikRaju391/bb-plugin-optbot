@@ -52,7 +52,7 @@ it("does not look up already acknowledged receipts again on later recoveries",as
     return Object.assign(statement,{get:(...args:unknown[])=>{lookups++;return get(...args);}});
   }) as typeof db.prepare;
   chat.recoverQueued(bot);
-  expect(lookups).toBeLessThanOrEqual(200);
+  expect(lookups).toBe(200);
   lookups=0;
   chat.recoverQueued(bot);
   expect(lookups).toBe(0);
@@ -61,6 +61,8 @@ it("does not look up already acknowledged receipts again on later recoveries",as
 
 it("preserves parent ordering, active leases, unknown waiting parents, and recovery idempotence",async()=>{
   const {archive,chat,db}=await fixture(2);
+  // Warm the acknowledged cache first: parents whose first receipt is cached must keep their place in the order.
+  chat.recoverQueued(bot);
   const receive=(id:string,parentId:string)=>archive.receive(bot,{id,parentId,threadId:thread,text:id,date});
   receive("new-parent-one","new-parent");
   receive("old-parent-one","parent-0");
@@ -89,4 +91,24 @@ it("does not treat a matching receipt id in another conversation as acknowledged
   db.prepare("UPDATE optchat_log SET thread_id='other_conversation'").run();
   expect(()=>chat.recoverQueued(bot)).toThrow("Conflicting duplicate memory event");
   expect(db.prepare("SELECT count(*) AS n FROM optchat_log").get()).toEqual({n:1});
+});
+
+it("recovers a receipt whose turn is still marked active but whose lease has expired",async()=>{
+  const {archive,chat,db}=await fixture(1);
+  archive.receive(bot,{id:"stale",parentId:"stale-turn",threadId:thread,text:"stale",date});
+  db.prepare("INSERT INTO optchat_runs(bot_id,request_id,thread_id,lease,expires,status,result) VALUES (?,?,?,?,?,?,?)")
+    .run(bot,"stale-turn",thread,"stale-lease",now-1,"active","");
+  chat.recoverQueued(bot);
+  expect(db.prepare("SELECT event_key AS key FROM optchat_log WHERE bot_id=? ORDER BY idx").all(bot)).toEqual([{key:"old-0:input"},{key:"stale:input"}]);
+});
+
+it("keeps acknowledged receipts separate for each bot",async()=>{
+  const {archive,chat,db}=await fixture(1);
+  const other="synthetic_bot_two";
+  // The same receipt id is already in the first bot's memory, but not yet in the second bot's.
+  archive.receive(other,{id:"old-0",parentId:"parent-0",threadId:thread,text:"message 0",date});
+  chat.recoverQueued(bot);
+  chat.hydrate(other);
+  chat.recoverQueued(other);
+  expect(db.prepare("SELECT event_key AS key FROM optchat_log WHERE bot_id=?").all(other)).toEqual([{key:"old-0:input"}]);
 });
