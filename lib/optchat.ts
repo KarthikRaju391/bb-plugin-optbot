@@ -372,7 +372,24 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const view=`<chat>\n${parts(bot).map(part=>`${label(part)}|${(node(bot,part)??"(not summarized yet: zoom it)").replace(/\r\n|\n|\r/g," ")}`).join("\n")}\n</chat>`;
       return {version:1 as const,botId:bot,main,tree,view,inbox:[...receipts(bot).values()]};
     },
-    recoverQueued(bot:string){const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());const parents=new Set([...receipts(bot).values()].map(row=>row.parentId));for(const id of parents){const run=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,id) as {status:string;expires:number}|undefined;if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))flushInbox(bot,id);}},
+    recoverQueued(bot:string) {
+      const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());
+      const logged=db.prepare("SELECT thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?");
+      const pending=new Map<string,Receipt[]>();
+      for(const row of receipts(bot).values()) {
+        let group=pending.get(row.parentId);
+        if(!group)pending.set(row.parentId,group=[]);
+        const old=logged.get(bot,`${row.id}:input`) as {threadId:string}|undefined;
+        if(old?.threadId!==row.threadId)group.push(row);
+      }
+      const status=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?");
+      for(const [id,rows] of pending) {
+        if(!rows.length)continue;
+        const run=status.get(bot,id) as {status:string;expires:number}|undefined;
+        if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))
+          for(const row of rows)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);
+      }
+    },
     enqueue(bot:string,threadId:string,id:string,parentId:string,text:string){const run=db.prepare("SELECT thread_id AS threadId,status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,parentId) as {threadId:string;status:string;expires:number}|undefined;
       // A turn that has not begun yet (its begin still waiting, e.g. on another conversation's turn) takes the message too:
       // the receipt waits for it, and recoverQueued logs it if that turn never begins (live: a second subagent report
