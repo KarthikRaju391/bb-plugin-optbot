@@ -41,6 +41,24 @@ it("does not rescan all historical receipts once per completed parent",async()=>
   expect(readFileSync(mainPath)).toEqual(original);
 });
 
+it("does not look up already acknowledged receipts again on later recoveries",async()=>{
+  const {chat,db}=await fixture(200);
+  const prepare=db.prepare.bind(db);
+  let lookups=0;
+  db.prepare=((sql:string)=>{
+    const statement=prepare(sql);
+    if(!/FROM optchat_log WHERE bot_id=\? AND event_key=\?/.test(sql))return statement;
+    const get=statement.get.bind(statement);
+    return Object.assign(statement,{get:(...args:unknown[])=>{lookups++;return get(...args);}});
+  }) as typeof db.prepare;
+  chat.recoverQueued(bot);
+  expect(lookups).toBeLessThanOrEqual(200);
+  lookups=0;
+  chat.recoverQueued(bot);
+  expect(lookups).toBe(0);
+  expect(db.prepare("SELECT count(*) AS n FROM optchat_log").get()).toEqual({n:200});
+});
+
 it("preserves parent ordering, active leases, unknown waiting parents, and recovery idempotence",async()=>{
   const {archive,chat,db}=await fixture(2);
   const receive=(id:string,parentId:string)=>archive.receive(bot,{id,parentId,threadId:thread,text:id,date});

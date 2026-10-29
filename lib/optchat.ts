@@ -229,6 +229,9 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   }
   function partBytes(part: Part, text: (part: Part) => string | undefined) { return bytes(text(part) ?? "(not summarized yet: zoom it)"); }
   const temporaryInbox=new Map<string,Map<string,Receipt>>();
+  // Receipt ids already in permanent memory for their own conversation. The log only grows and receipts never change,
+  // so an id that is acknowledged stays acknowledged; recoverQueued then skips its SQL lookup on every later call.
+  const acknowledged=new Map<string,Set<string>>();
   function receipts(bot:string){if(options.archive)return options.archive.receipts(bot);let values=temporaryInbox.get(bot);if(!values)temporaryInbox.set(bot,values=new Map());return values;}
   function receive(bot:string,threadId:string,id:string,parentId:string,text:string){const value={id,parentId,threadId,text,date:new Date(now()).toISOString()};if(options.archive)return options.archive.receive(bot,value);const old=receipts(bot).get(id);if(old){if(old.text!==text||old.threadId!==threadId)throw new Error("Conflicting duplicate queued input");return old;}receipts(bot).set(id,value);return value;}
   // An input logged before reports became `work` stays as it was: the log is permanent, so a replay of its
@@ -376,11 +379,15 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());
       const logged=db.prepare("SELECT thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?");
       const pending=new Map<string,Receipt[]>();
+      let done=acknowledged.get(bot);
+      if(!done)acknowledged.set(bot,done=new Set());
       for(const row of receipts(bot).values()) {
         let group=pending.get(row.parentId);
         if(!group)pending.set(row.parentId,group=[]);
+        if(done.has(row.id))continue;
         const old=logged.get(bot,`${row.id}:input`) as {threadId:string}|undefined;
-        if(old?.threadId!==row.threadId)group.push(row);
+        if(old?.threadId===row.threadId)done.add(row.id);
+        else group.push(row);
       }
       const status=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?");
       for(const [id,rows] of pending) {
