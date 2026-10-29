@@ -398,6 +398,8 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       }
       if (existing?.status === "completed") return { status: "completed" as const, result: existing.result };
       const active = db.prepare("SELECT request_id AS requestId,thread_id AS threadId,lease,expires,status,result FROM optchat_runs WHERE bot_id=? AND status='active'").get(bot) as Run | undefined;
+      // The same request asking again (its first reply was lost) gets its own lease back.
+      if (active && active.requestId === requestId && active.threadId === threadId && active.expires > now()) return { status: "active" as const, lease: active.lease, answer: existing?.answer ?? null };
       if (active && active.expires > now()) return { status: "busy" as const };
       if (active) {
         flushInbox(bot,active.requestId);
@@ -464,6 +466,10 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       return { text, entries: count(bot), bytes: bytes(text), summaryBytes };
     },
     finish: db.transaction((bot: string, thread: string, lease: string, status: "completed" | "failed" | "stopped", result: string) => {
+      // The same finish again (a retried call whose first reply was lost) changes nothing. A stale host whose lease was
+      // taken over (status failed, result not its own) still gets "lease expired" below.
+      const done = db.prepare("SELECT status,result FROM optchat_runs WHERE bot_id=? AND lease=? AND thread_id=?").get(bot, lease, thread) as { status: string; result: string } | undefined;
+      if (done && done.status === (status === "stopped" ? "failed" : status) && done.result === result) return { ok: true };
       const run=requireLease(bot, thread, lease);
       flushInbox(bot,run.requestId);
       if (status === "failed") append(bot, thread, `failure:${lease}`, "note", `Attempt failed: ${result}. Verify prior side effects before retrying.`);

@@ -12,7 +12,7 @@ export type ModelEvent =
   | { kind: "echo"; id: string; text: string; error?: boolean }
   | { kind: "result"; success: boolean; text: string };
 export type AgentTool = { name: string; description: string; inputSchema: unknown; execute: (input: Record<string, unknown>) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> };
-export type ModelOptions = { cwd: string; model: string; instructions: string; permissionMode: "full" | "plan" | "auto" | "accept-edits"; reasoningLevel?:PluginProviderReasoningLevel;serviceTier?:"default"|"fast";env: NodeJS.ProcessEnv; signal: AbortSignal; tools: AgentTool[]; incoming?: () => { id: string; text: string }[]; onUsage?: (usage: unknown) => void };
+export type ModelOptions = { cwd: string; model: string; instructions: string; permissionMode: "full" | "plan" | "auto" | "accept-edits"; reasoningLevel?:PluginProviderReasoningLevel;serviceTier?:"default"|"fast";env: NodeJS.ProcessEnv; signal: AbortSignal; tools: AgentTool[]; incoming?: (take?: { final?: boolean; notices?: boolean }) => { id: string; text: string }[]; onUsage?: (usage: unknown) => void };
 /** The reason a turn's signal carries when the user stops it (not a bridge restart or a failure). */
 export class UserStop extends Error { constructor() { super("Stopped by the user"); } }
 export interface ModelBoundary {
@@ -117,7 +117,8 @@ export async function runOptChatTurn(args: {
       }
       // Messages the call did not take start a new call with a fresh view, rendered before they are logged
       // (UniiChat: a call's leftover messages wait for the next call; nothing carries over but the view).
-      const left = options.incoming?.() ?? [];
+      // The last check of the turn: it takes agent notices too, and with nothing left the turn closes to new messages.
+      const left = options.incoming?.({ final: true, notices: true }) ?? [];
       if (!left.length) break;
       check();
       await settle();

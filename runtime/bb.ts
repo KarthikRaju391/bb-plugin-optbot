@@ -11,6 +11,8 @@ export type WorkerCall=(input:Record<string,unknown>)=>Promise<unknown>;
 export type WorkerPage={events:ModelEvent[];cursor?:string;done:boolean;open?:{id:string;name:string;input:unknown}[]};
 // The worker thread is hidden: an interactive question there would wait forever, so questions go in the reply.
 export const STEER_QUIET_MS=8_000;
+/** A worker poll goes through BB's server: 250 ms while the worker produces events, up to 2 s while it is quiet. */
+export const POLL_MIN_MS=250, POLL_MAX_MS=2_000;
 const WORKER_NOTE="You run in a hidden worker thread that nobody watches. Never use interactive question or approval tools such as AskUserQuestion; when you need the user's decision, end your turn and ask in your reply. This thread is closed when your turn ends, which stops anything still running in it: for subagents use optbot_spawn and optbot_tell, which run in their own threads and report back to you, never your built-in agent, task or delegation tools.";
 export function bbWorkerModel(call:WorkerCall):ModelBoundary {
  let open:NonNullable<WorkerPage["open"]>=[];
@@ -18,7 +20,7 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
   unanswered:()=>open,
   async *stream(prompt,options) {
    bbModelRef(options.model); options.signal.throwIfAborted();
-   const key=randomUUID();let workerId:string|undefined,cursor:string|undefined,steered=false,idleSince:number|undefined;
+   const key=randomUUID();let workerId:string|undefined,cursor:string|undefined,steered=false,idleSince:number|undefined,wait=POLL_MIN_MS;
    const pause=(ms:number)=>new Promise<void>((resolve,reject)=>{
     const abort=()=>{clearTimeout(timer);reject(options.signal.reason??new Error("Turn cancelled"));};
     const timer=setTimeout(()=>{options.signal.removeEventListener("abort",abort);resolve();},ms);
@@ -51,11 +53,9 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
       break;
      }
      idleSince=undefined;
-     await new Promise<void>((resolve,reject)=>{
-      const abort=()=>{clearTimeout(timer);reject(options.signal.reason??new Error("Turn cancelled"));};
-      const timer=setTimeout(()=>{options.signal.removeEventListener("abort",abort);resolve();},100);
-      if(options.signal.aborted)abort();else options.signal.addEventListener("abort",abort,{once:true});
-     });
+     // Each poll is a call through BB's server: quick while the worker produces, backing off while it is quiet.
+     wait=page.events.length||incoming.length?POLL_MIN_MS:Math.min(POLL_MAX_MS,Math.round(wait*1.5));
+     await pause(wait);
     }
    } finally {
     try {await call({action:"stop",key,...(workerId?{workerId}:{})});}
