@@ -229,9 +229,11 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   }
   function partBytes(part: Part, text: (part: Part) => string | undefined) { return bytes(text(part) ?? "(not summarized yet: zoom it)"); }
   const temporaryInbox=new Map<string,Map<string,Receipt>>();
-  // Receipt ids already in permanent memory for their own conversation. The log only grows and receipts never change,
-  // so an id that is acknowledged stays acknowledged; recoverQueued then skips its SQL lookup on every later call.
-  const acknowledged=new Map<string,Set<string>>();
+  // recoverQueued's progress per bot, so a pass costs the receipts still open, not the whole inbox. The inbox only grows
+  // (receipts are appended and never change), and the log only grows, so a receipt found in permanent memory for its own
+  // conversation stays there and leaves `open` for good. `first` keeps each parent's first-seen position, which orders
+  // recovery exactly as a scan of the whole inbox would. Kept for one inbox object; a different one starts over.
+  const recovery=new Map<string,{inbox:Map<string,Receipt>;seen:number;first:Map<string,number>;open:Receipt[]}>();
   function receipts(bot:string){if(options.archive)return options.archive.receipts(bot);let values=temporaryInbox.get(bot);if(!values)temporaryInbox.set(bot,values=new Map());return values;}
   function receive(bot:string,threadId:string,id:string,parentId:string,text:string){const value={id,parentId,threadId,text,date:new Date(now()).toISOString()};if(options.archive)return options.archive.receive(bot,value);const old=receipts(bot).get(id);if(old){if(old.text!==text||old.threadId!==threadId)throw new Error("Conflicting duplicate queued input");return old;}receipts(bot).set(id,value);return value;}
   // An input logged before reports became `work` stays as it was: the log is permanent, so a replay of its
@@ -378,23 +380,36 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     recoverQueued(bot:string) {
       const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());
       const logged=db.prepare("SELECT thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?");
-      const pending=new Map<string,Receipt[]>();
-      let done=acknowledged.get(bot);
-      if(!done)acknowledged.set(bot,done=new Set());
-      for(const row of receipts(bot).values()) {
+      const inbox=receipts(bot);
+      let state=recovery.get(bot);
+      if(!state||state.inbox!==inbox)recovery.set(bot,state={inbox,seen:0,first:new Map(),open:[]});
+      if(inbox.size>state.seen) {
+        let at=0;
+        for(const row of inbox.values()) {
+          if(at>=state.seen) {
+            if(!state.first.has(row.parentId))state.first.set(row.parentId,at);
+            state.open.push(row);
+          }
+          at++;
+        }
+        state.seen=at;
+      }
+      const open:Receipt[]=[], pending=new Map<string,Receipt[]>();
+      for(const row of state.open) {
+        const old=logged.get(bot,`${row.id}:input`) as {threadId:string}|undefined;
+        if(old?.threadId===row.threadId)continue;
+        open.push(row);
         let group=pending.get(row.parentId);
         if(!group)pending.set(row.parentId,group=[]);
-        if(done.has(row.id))continue;
-        const old=logged.get(bot,`${row.id}:input`) as {threadId:string}|undefined;
-        if(old?.threadId===row.threadId)done.add(row.id);
-        else group.push(row);
+        group.push(row);
       }
+      state.open=open;
+      const order=[...pending.keys()].sort((a,b)=>state.first.get(a)!-state.first.get(b)!);
       const status=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?");
-      for(const [id,rows] of pending) {
-        if(!rows.length)continue;
+      for(const id of order) {
         const run=status.get(bot,id) as {status:string;expires:number}|undefined;
         if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))
-          for(const row of rows)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);
+          for(const row of pending.get(id)!)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);
       }
     },
     enqueue(bot:string,threadId:string,id:string,parentId:string,text:string){const run=db.prepare("SELECT thread_id AS threadId,status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,parentId) as {threadId:string;status:string;expires:number}|undefined;

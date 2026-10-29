@@ -41,6 +41,22 @@ it("does not rescan all historical receipts once per completed parent",async()=>
   expect(readFileSync(mainPath)).toEqual(original);
 });
 
+it("walks only receipts that arrived since the last recovery",async()=>{
+  const {archive,chat,db}=await fixture(200);
+  const receipts=archive.receipts(bot), values=receipts.values.bind(receipts);
+  let visited=0;
+  Object.defineProperty(receipts,"values",{value:function*(){for(const row of values()){visited++;yield row;}}});
+  chat.recoverQueued(bot);
+  expect(visited).toBe(200);
+  visited=0;
+  chat.recoverQueued(bot);
+  expect(visited).toBe(0);
+  archive.receive(bot,{id:"late",parentId:"late-parent",threadId:thread,text:"late",date});
+  chat.recoverQueued(bot);
+  expect(visited).toBeLessThanOrEqual(201);
+  expect(db.prepare("SELECT event_key AS key FROM optchat_log WHERE bot_id=? ORDER BY idx DESC LIMIT 1").get(bot)).toEqual({key:"late:input"});
+});
+
 it("does not look up already acknowledged receipts again on later recoveries",async()=>{
   const {chat,db}=await fixture(200);
   const prepare=db.prepare.bind(db);
