@@ -118,7 +118,7 @@ it("recovers a receipt whose turn is still marked active but whose lease has exp
   expect(db.prepare("SELECT event_key AS key FROM optchat_log WHERE bot_id=? ORDER BY idx").all(bot)).toEqual([{key:"old-0:input"},{key:"stale:input"}]);
 });
 
-it("keeps acknowledged receipts separate for each bot",async()=>{
+it("keeps recovery state separate for each bot",async()=>{
   const {archive,chat,db}=await fixture(1);
   const other="synthetic_bot_two";
   // The same receipt id is already in the first bot's memory, but not yet in the second bot's.
@@ -127,4 +127,10 @@ it("keeps acknowledged receipts separate for each bot",async()=>{
   chat.hydrate(other);
   chat.recoverQueued(other);
   expect(db.prepare("SELECT event_key AS key FROM optchat_log WHERE bot_id=?").all(other)).toEqual([{key:"old-0:input"}]);
+  // Alternating between bots must not throw away the first bot's progress (the compactor pumps every bot each second).
+  const receipts=archive.receipts(bot), values=receipts.values.bind(receipts);
+  let visited=0;
+  Object.defineProperty(receipts,"values",{value:function*(){for(const row of values()){visited++;yield row;}}});
+  chat.recoverQueued(bot);
+  expect(visited).toBe(0);
 });
