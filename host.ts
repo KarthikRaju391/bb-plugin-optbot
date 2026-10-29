@@ -77,7 +77,8 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         // BB itself can fail to deliver the call (the daemon's request to a frozen server): same wait.
         const network = retryable && error instanceof Error && !(error instanceof ToolTimeout) && TRANSIENT_NETWORK.test(error.message) && Date.now() - started < TRANSIENT_PATIENCE_MS;
         if (network) { await new Promise(resolve => setTimeout(resolve, Math.min(2_000 * attempt, 15_000))); continue; }
-        if (!(error instanceof ToolTimeout) || !retryable || attempt >= 3) throw error;
+        // A frozen BB server times calls out back to back (live 10-29 16:01): retried as long as network errors are.
+        if (!(error instanceof ToolTimeout) || !retryable || Date.now() - started >= TRANSIENT_PATIENCE_MS) throw error;
         continue;
       }
       if (!retryable || Date.now() - started >= TRANSIENT_PATIENCE_MS) return response;

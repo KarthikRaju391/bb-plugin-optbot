@@ -6,7 +6,9 @@ import { REPORT, reportText } from "./agents";
 
 export const NODE_BYTES = 512;
 export const VIEW_BYTES = VIEW_HIGH;
-export const LEASE_MS = 60_000;
+// Long enough to ride out BB's server freezing (live 10-29: 10-15 s stalls back to back, 30 s in total) while the
+// bridge's heartbeats (every 10 s) cannot get through; a restart's cut turns are resumed this long after the restart.
+export const LEASE_MS = 150_000;
 export type MemoryKind = "user" | "talk" | "tool" | "echo" | "work" | "note";
 /** A line as views show it: newlines and the whitespace around them as one space (UniiChat Memory.flat). */
 export function flatLine(text: string) { return text.includes("\n") ? text.replace(/\s*\n\s*/g, " ") : text; }
@@ -260,7 +262,10 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   }
   function requireLease(bot: string, threadId: string, lease: string) {
     const run = db.prepare("SELECT request_id AS requestId,thread_id AS threadId,lease,expires,status,result FROM optchat_runs WHERE bot_id=? AND lease=? AND status='active'").get(bot, lease) as Run | undefined;
-    if (!run || run.threadId !== threadId || run.expires <= now()) throw new Error("OptChat lease expired or belongs to another conversation");
+    if (!run || run.threadId !== threadId) throw new Error("OptChat lease expired or belongs to another conversation");
+    // Expiry lets another turn take over from a bridge that died; a takeover marks this run failed (refused above). A
+    // turn whose lease ran out while BB's server froze, with nobody taking over, is still the turn: it renews.
+    if (run.expires <= now()) db.prepare("UPDATE optchat_runs SET expires=? WHERE bot_id=? AND lease=?").run(now() + LEASE_MS, bot, lease);
     return run;
   }
   /** UniiChat Memory.view: the built lines of `parts` before message `end`, as `<chat>\n` + `id+n|line\n`... + `</chat>\n`. */
