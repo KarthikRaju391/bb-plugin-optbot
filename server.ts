@@ -247,10 +247,10 @@ export default async function plugin(bb: BbPluginApi) {
     // An agent's thread: its row may not exist yet on the first configure, so the spawn's metadata counts too.
     if (typeof ctx.pluginMetadata.optbotAgent === "string" || subagents.isAgent(ctx.thread.id)) return { tools: ["optbot_memory"], skills: [] };
     // An OptBot side session only needs to run its native worker and read the main conversation.
-    if (ctx.provider.id === "optbot" && ctx.origin.kind === "fork" && !store.owner(ctx.thread.id)) return { tools: ["optbot_worker", "optbot_side"], skills: [] };
+    if (ctx.provider.id === "optbot" && ctx.origin.kind === "fork" && ctx.origin.pluginId === "side-chat" && !store.owner(ctx.thread.id)) return { tools: ["optbot_worker", "optbot_side"], skills: [] };
     const botId = contextOwner(ctx);
     const bot = botId ? store.get(botId) : null;
-    return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory", "optbot_worker"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
+    return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory", "optbot_worker", ...(ctx.origin.kind === "fork" ? ["optbot_side"] : [])], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
   });
   bb.agents.registerTool({
     name: "optbot_worker", description: "Private OptChat execution protocol. Delegates to installed BB providers; never an agent-facing tool.", parameters: workerInput,
@@ -267,6 +267,9 @@ export default async function plugin(bb: BbPluginApi) {
     name: "optbot_side", description: SIDE_TOOL_DESCRIPTION, parameters: sideInput,
     async execute(_input, ctx) {
       const thread = await retryReads(() => bb.sdk.threads.get({ threadId: ctx.threadId }));
+      // The provider forks every OptBot conversation it is asked to; only a side chat is a side session. A fork from
+      // BB's Fork action is another conversation of the source's bot (bound on creation): it runs with memory.
+      if (thread.providerId === "optbot" && thread.originKind === "fork" && !isSideChat(thread) && await resolveOwner(thread.id)) return JSON.stringify({ side: false });
       if (thread.providerId !== "optbot" || !isSideChat(thread) || !thread.sourceThreadId || store.owner(thread.id)) throw new Error("Only an OptBot side chat reads side-chat context");
       const [source, side] = await Promise.all([
         retryReads(() => bb.sdk.threads.timeline({ threadId: thread.sourceThreadId! })),
@@ -410,6 +413,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     conversation_assign: ({ botId, threadId }) => serial("registry", () => serial(botId, async () => {
       const bot = store.require(botId); const thread = await bb.sdk.threads.get({ threadId });
+      if (isSideChat(thread)) throw new Error("A side chat belongs to the thread it branches from; it cannot be assigned to a bot");
       const existing = await resolveOwner(threadId, false);
       if (existing && existing !== botId) throw new Error("Conversation already belongs to another bot");
       if (store.owner(threadId) === botId) return { ok: true } as const;

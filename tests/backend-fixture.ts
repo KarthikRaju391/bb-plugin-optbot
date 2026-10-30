@@ -21,11 +21,12 @@ export async function backend(initialProjects: Project[] = [project()]) {
   const projects = [...initialProjects];
   const personal = { ...project(PERSONAL_ID), kind: "personal" as const, sources: [] };
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
-  // BB timelines and event feeds, in the shapes BB's API returns (rows captured from live 0.48.0 responses).
+  // BB timelines and event feeds, shaped like BB 0.48.0 API responses (top-level rows only; no paging).
   const timelines = new Map<string, unknown[]>();
   const events = new Map<string, unknown[]>();
   const outputs = new Map<string, string>();
   const sends: Record<string, unknown>[] = [];
+  let onArchive: ((threadId: string) => Promise<void>) | null = null;
   let onSpawn: ((thread: ReturnType<typeof makeThreadResponse>, args: Record<string, unknown>) => void) | null = null;
   const files = new Map<string, string>();
   const offline = new Set<string>();
@@ -62,7 +63,7 @@ export async function backend(initialProjects: Project[] = [project()]) {
       events: { list: async ({ threadId, afterSeq }) => (events.get(threadId) ?? []).filter((row) => (row as { seq: number }).seq > Number(afterSeq ?? 0)) as never },
       stop: async () => ({}) as never,
       send: async (args) => { sends.push(args as unknown as Record<string, unknown>); return ({}) as never; },
-      archive: async ({ threadId }) => { const found = threads.get(threadId); if (found) threads.set(threadId, { ...found, archivedAt: Date.now() }); return ({}) as never; },
+      archive: async ({ threadId }) => { await onArchive?.(threadId); const found = threads.get(threadId); if (found) threads.set(threadId, { ...found, archivedAt: Date.now() }); return ({}) as never; },
       output: async ({ threadId }) => ({ output: outputs.get(threadId) ?? null }) as never,
       spawn: async (args) => {
         if (failSpawn) throw new Error("Spawn failed");
@@ -86,6 +87,7 @@ export async function backend(initialProjects: Project[] = [project()]) {
   return {
     projects, threads, files, offline, put, get, initialConfigurations, timelines, events, outputs, sends,
     setOnSpawn(fn: typeof onSpawn) { onSpawn = fn; },
+    setOnArchive(fn: typeof onArchive) { onArchive = fn; },
     get bb() { return host.bb; }, get harness() { return host.harness; }, get store() { return store; },
     stateDirectory(botId: string) { return join(dirname(store.databasePath), "state", botId); },
     seedLegacy(value: unknown) { const parsed = value as { id: string }; host.bb.storage.database().prepare("INSERT OR REPLACE INTO bots(id,data) VALUES (?,?)").run(parsed.id, JSON.stringify(value)); },

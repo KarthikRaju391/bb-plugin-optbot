@@ -216,7 +216,9 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
  // BB marks a thread failed when one command fails (a rejected message), even while its turn runs on.
  // Only cancel workers for a failed thread when no live turn still owns them.
  let liveTurn:(threadId:string)=>boolean=()=>false;
- for(const event of ["thread.idle","thread.failed","thread.archived","thread.deleted"] as const)bb.events.on(event,async({thread})=>{if(event==="thread.failed"&&liveTurn(thread.id))return;await cancelParent(thread.id);});
+ // A side chat's turn has no OptChat lease: its open worker is what shows the turn is still running.
+ const sideLive=(threadId:string)=>!!db.prepare("SELECT 1 FROM optbot_workers WHERE parent=? AND role='side' AND status IN ('starting','active','completed')").get(threadId);
+ for(const event of ["thread.idle","thread.failed","thread.archived","thread.deleted"] as const)bb.events.on(event,async({thread})=>{if(event==="thread.failed"&&(liveTurn(thread.id)||sideLive(thread.id)))return;await cancelParent(thread.id);});
  const oldRows=db.prepare("SELECT * FROM optbot_workers WHERE status!='stopped'").all() as Row[];
  const recovery=Promise.all(oldRows.map(async row=>{
   try {

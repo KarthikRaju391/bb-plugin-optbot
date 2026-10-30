@@ -50,7 +50,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
   // conversation's recent messages as context, and never read or write the bot's memory.
   const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string; acknowledged?: boolean; side?: boolean }>();
   const SIDE_PREFIX = "optbot-side:";
-  type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:Incoming[];closing?:boolean;closed?:boolean;received:Map<string,string>};
+  type State={decided?:Promise<string|null>;controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:Incoming[];closing?:boolean;closed?:boolean;received:Map<string,string>};
   const active = new Map<string, State>();
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   const model = deps.model ?? apiModel;
@@ -102,15 +102,31 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       return JSON.parse(result.content);
     };
   }
-  // One side-chat turn: BB's timelines give the context (optbot_side), a fresh native worker answers.
-  async function runSide(params: z.infer<typeof turnStartParamsSchema>, options: ModelOptions, providerTurnId: string, onEvent: (event: ModelEvent) => void) {
-    const context = decodeToolCallResponsePayload(await callRetrying(params.threadId, "optbot_side", { action: "context" }, providerTurnId, true));
+  // Whether a fork session is a side chat: the server answers with the side chat's context, or { side: false } for a
+  // fork from BB's Fork action, which is a normal conversation of the source's bot.
+  async function sideContextFor(threadId: string, providerTurnId: string): Promise<string | null> {
+    const context = decodeToolCallResponsePayload(await callRetrying(threadId, "optbot_side", { action: "context" }, providerTurnId, true));
     if (context.isError) throw new Error(context.content);
-    const prompt = `${(JSON.parse(context.content) as { text: string }).text}\n\n---\n\nThe user's message in the side chat:\n\n${describeInput(params.input)}`;
-    const worker = deps.model ?? bbWorkerModel(workerCall(params.threadId, providerTurnId), { system: "", note: SIDE_WORKER_NOTE });
-    for await (const event of worker.stream(prompt, options)) {
-      if (event.kind === "result") { if (!event.success) throw new Error(event.text || "The side chat's worker failed"); continue; }
-      onEvent(event);
+    const value = JSON.parse(context.content) as { text: string } | { side: false };
+    return "text" in value ? value.text : null;
+  }
+  // One side-chat turn: BB's timelines give the context, a fresh native worker answers. Messages that arrive before the
+  // turn's last check are answered by another worker with fresh context; after it the turn is closed, so later ones
+  // start the next turn (NO_ACTIVE_TURN), as in runOptChatTurn.
+  async function runSide(params: z.infer<typeof turnStartParamsSchema>, options: ModelOptions, providerTurnId: string, onEvent: (event: ModelEvent) => void, context: string) {
+    let message = describeInput(params.input);
+    for (;;) {
+      const prompt = `${context}\n\n---\n\nThe user's message in the side chat:\n\n${message}`;
+      const worker = deps.model ?? bbWorkerModel(workerCall(params.threadId, providerTurnId), { system: "", note: SIDE_WORKER_NOTE });
+      for await (const event of worker.stream(prompt, options)) {
+        if (event.kind === "result") { if (!event.success) throw new Error(event.text || "The side chat's worker failed"); continue; }
+        onEvent(event);
+      }
+      const left = options.incoming?.({ final: true, notices: true }) ?? [];
+      if (!left.length) return;
+      for (const item of left) onEvent({ kind: "user", ...item });
+      message = left.map((item) => item.text).join("\n\n");
+      context = (await sideContextFor(params.threadId, providerTurnId)) ?? context;
     }
   }
   async function run(params: z.infer<typeof turnStartParamsSchema>, state: State) {
@@ -123,6 +139,13 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     // turned into this turn stayed "Steer pending" forever (Opty seq 27182, 10482).
     delta(params.threadId, [{ kind: "turn.open", providerTurnId }]);
     delta(params.threadId, [{ kind: "input.accepted", clientRequestId: params.clientRequestId, providerTurnId }]);
+    // A fork session finds out from the server whether it is a side chat (once per turn; steers wait for the answer).
+    let sideContext: string | null = null;
+    if (session.side) {
+      state.decided = sideContextFor(params.threadId, providerTurnId);
+      try { sideContext = await state.decided; } catch (error) { state.decided = Promise.resolve(null); throw error; }
+      if (sideContext === null) session.side = false;
+    }
     // Once per bridge: steers an older bridge left "pending" (taken, never acknowledged) are acknowledged in this open
     // turn, in the background so the turn never waits on the lookup. Best effort: if the turn has ended, they stay.
     if (!session.side && !session.acknowledged) {
@@ -182,7 +205,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
           {name:"date",description:"The date and time of message id.",parameters:z.object({id:z.number().int().nonnegative()}).strict()}].map(entry=>({name:entry.name,description:entry.description,inputSchema:z.toJSONSchema(entry.parameters),execute:async(input:Record<string,unknown>)=>{const parsed=entry.parameters.parse(input);const value=await memory(params.threadId,{action:entry.name,start:parsed.id,...("n" in parsed?{count:parsed.n}:{}),...("at" in parsed&&parsed.at!==undefined?{at:parsed.at}:{})},providerTurnId);return {content:[{type:"text" as const,text:String(value)}]};}}));
         options.tools=[...new Map([...workspaceTools(options),...options.tools,...navigation].map(tool=>[tool.name,tool])).values()];
       }
-      if (session.side) await runSide(params, options, providerTurnId, onEvent);
+      if (session.side) await runSide(params, options, providerTurnId, onEvent, sideContext!);
       else await runOptChatTurn({
         call: (input) => memory(params.threadId, input, providerTurnId), model: !deps.model && options.model.startsWith("bb/") ? bbWorkerModel(workerCall(params.threadId, providerTurnId)) : model,
         requestId: params.clientRequestId,
@@ -265,6 +288,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         if(prior!==undefined&&prior!==text)throw new Error("A client request ID cannot be reused with different input");
         if(prior!==undefined&&ended())throw new NoActiveTurn("The OptBot turn ended while this message arrived; it starts the next turn");
         if(prior===undefined){
+          if(session.side&&turn.decided)await turn.decided.catch(()=>null);
           // A side session keeps nothing in the bot's memory: the message goes straight to its worker.
           if(!session.side)await memory(params.threadId,{action:"enqueue",requestId:params.clientRequestId,parentId:turn.requestId,text},params.expectedTurnId);
           turn.received.set(params.clientRequestId,text);
