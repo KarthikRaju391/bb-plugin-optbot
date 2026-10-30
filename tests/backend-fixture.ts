@@ -21,6 +21,13 @@ export async function backend(initialProjects: Project[] = [project()]) {
   const projects = [...initialProjects];
   const personal = { ...project(PERSONAL_ID), kind: "personal" as const, sources: [] };
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
+  // BB timelines and event feeds, shaped like BB 0.48.0 API responses (top-level rows only; no paging).
+  const timelines = new Map<string, unknown[]>();
+  const events = new Map<string, unknown[]>();
+  const outputs = new Map<string, string>();
+  const sends: Record<string, unknown>[] = [];
+  let onArchive: ((threadId: string) => Promise<void>) | null = null;
+  let onSpawn: ((thread: ReturnType<typeof makeThreadResponse>, args: Record<string, unknown>) => void) | null = null;
   const files = new Map<string, string>();
   const offline = new Set<string>();
   const initialConfigurations: { threadId: string; instructions: string | null; tools: string[] }[] = [];
@@ -52,10 +59,17 @@ export async function backend(initialProjects: Project[] = [project()]) {
     threads: {
       list: async ({ projectId, parentThreadId, archived = false, offset = 0, limit = 100 } = {}) => [...threads.values()].filter((t) => (!projectId || t.projectId === projectId) && (!parentThreadId || t.parentThreadId === parentThreadId) && Boolean(t.archivedAt) === archived).slice(offset, offset + limit),
       get: async ({ threadId }) => { const found = threads.get(threadId); if (!found) throw new Error("Thread missing"); return found; },
+      timeline: async ({ threadId }) => ({ maxSeq: 0, rows: timelines.get(threadId) ?? [] }) as never,
+      events: { list: async ({ threadId, afterSeq }) => (events.get(threadId) ?? []).filter((row) => (row as { seq: number }).seq > Number(afterSeq ?? 0)) as never },
+      stop: async () => ({}) as never,
+      send: async (args) => { sends.push(args as unknown as Record<string, unknown>); return ({}) as never; },
+      archive: async ({ threadId }) => { await onArchive?.(threadId); const found = threads.get(threadId); if (found) threads.set(threadId, { ...found, archivedAt: Date.now() }); return ({}) as never; },
+      output: async ({ threadId }) => ({ output: outputs.get(threadId) ?? null }) as never,
       spawn: async (args) => {
         if (failSpawn) throw new Error("Spawn failed");
         const value = makeThreadResponse({ id: `thread-${++sequence}`, projectId: args.projectId, originPluginId: host.bb.pluginId, parentThreadId: args.parentThreadId ?? null, createdAt: Date.now() });
         threads.set(value.id, value);
+        onSpawn?.(value, args as Record<string, unknown>);
         const created = await host.harness.behavior.emitThreadEvent("thread.created", { thread: value });
         if (created.errors.length) throw created.errors[0];
         if (!args.sendAt) {
@@ -71,7 +85,9 @@ export async function backend(initialProjects: Project[] = [project()]) {
   await plugin(host.bb);
   let store = createBotStore(host.bb);
   return {
-    projects, threads, files, offline, put, get, initialConfigurations,
+    projects, threads, files, offline, put, get, initialConfigurations, timelines, events, outputs, sends,
+    setOnSpawn(fn: typeof onSpawn) { onSpawn = fn; },
+    setOnArchive(fn: typeof onArchive) { onArchive = fn; },
     get bb() { return host.bb; }, get harness() { return host.harness; }, get store() { return store; },
     stateDirectory(botId: string) { return join(dirname(store.databasePath), "state", botId); },
     seedLegacy(value: unknown) { const parsed = value as { id: string }; host.bb.storage.database().prepare("INSERT OR REPLACE INTO bots(id,data) VALUES (?,?)").run(parsed.id, JSON.stringify(value)); },
