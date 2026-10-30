@@ -36,7 +36,7 @@ export function nativeEvents(item:NativeItem):ModelEvent[] {
 }
 
 export const workerInput=z.object({action:z.enum(["start","poll","stop","steer"]),key:z.string().uuid().optional(),workerId:z.string().optional(),model:z.string().optional(),prompt:z.string().optional(),instructions:z.string().optional(),permissionMode:z.enum(["full","plan","auto","accept-edits"]).optional(),reasoningLevel:z.enum(["high","low","max","medium","none","ultra","ultracode","xhigh"]).optional(),serviceTier:z.enum(["default","fast"]).optional(),cursor:z.string().regex(/^\d+$/).optional(),text:z.string().optional()}).strict();
-type Row={key:string;parent:string|null;bot:string|null;worker:string|null;fingerprint:string;instructions:string;role:"master"|"summary";status:string;pending_result:string|null;model:string|null;reasoning:string|null};
+type Row={key:string;parent:string|null;bot:string|null;worker:string|null;fingerprint:string;instructions:string;role:"master"|"summary"|"side";status:string;pending_result:string|null;model:string|null;reasoning:string|null};
 // BB's server can freeze for seconds (synchronous SQLite) and drop a connection mid-request.
 // A running worker is unaffected, so read-only checks retry instead of failing the turn.
 const NETWORK=TRANSIENT_NETWORK;
@@ -88,7 +88,7 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   if(db.prepare("SELECT key FROM optbot_worker_cancellations WHERE key=?").get(row.key))throw new Error("OptBot worker request was cancelled before execution");
   return {botId:row.bot,role:row.role,instructions:row.instructions};
  }
- async function start(args:{key:string;model:string;prompt:string;instructions:string;permissionMode:NonNullable<z.infer<typeof workerInput>["permissionMode"]>;reasoningLevel?:z.infer<typeof workerInput>["reasoningLevel"];serviceTier?:z.infer<typeof workerInput>["serviceTier"];parent:string|null;bot:string|null;environment:Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0]["environment"];projectId:string;role:"master"|"summary"}) {
+ async function start(args:{key:string;model:string;prompt:string;instructions:string;permissionMode:NonNullable<z.infer<typeof workerInput>["permissionMode"]>;reasoningLevel?:z.infer<typeof workerInput>["reasoningLevel"];serviceTier?:z.infer<typeof workerInput>["serviceTier"];parent:string|null;bot:string|null;environment:Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0]["environment"];projectId:string;role:"master"|"summary"|"side"}) {
   const prior=locks.get(args.key);
   const run=(prior??Promise.resolve()).catch(()=>{}).then(async()=>{
    if(closed)throw new Error("OptBot workers are shutting down");
@@ -99,7 +99,7 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
    const row=db.prepare("SELECT * FROM optbot_workers WHERE key=?").get(args.key) as Row|undefined;
    if(row){if(row.fingerprint!==fingerprint)throw new Error("Worker key reused with different input");if(!row.worker)throw new Error("Worker spawn was interrupted; retry with a fresh request");return {workerId:row.worker};}
    db.prepare("INSERT INTO optbot_workers (key,parent,bot,worker,fingerprint,instructions,role,status,model,reasoning) VALUES (?,?,?,?,?,?,?,?,?,?)").run(args.key,args.parent,args.bot,null,fingerprint,args.instructions,args.role,"starting",args.model,args.reasoningLevel??null);
-   const worker=await bb.sdk.threads.spawn({projectId:args.projectId,environment:args.environment,...ref,...(args.reasoningLevel?{reasoningLevel:args.reasoningLevel}:{}),...(args.serviceTier?{serviceTier:args.serviceTier}:{}),prompt:`${args.instructions}\n\n${args.prompt}`,title:args.role==="summary"?"OptBot memory summary":"OptBot execution",visibility:"hidden",permissionMode:args.role==="summary"?"auto":args.permissionMode,pluginMetadata:{workerKey:args.key},...(args.parent?{lifecycleOwnerThreadId:args.parent}:{})});
+   const worker=await bb.sdk.threads.spawn({projectId:args.projectId,environment:args.environment,...ref,...(args.reasoningLevel?{reasoningLevel:args.reasoningLevel}:{}),...(args.serviceTier?{serviceTier:args.serviceTier}:{}),prompt:`${args.instructions}\n\n${args.prompt}`,title:args.role==="summary"?"OptBot memory summary":args.role==="side"?"OptBot side chat":"OptBot execution",visibility:"hidden",permissionMode:args.role==="summary"?"auto":args.permissionMode,pluginMetadata:{workerKey:args.key},...(args.parent?{lifecycleOwnerThreadId:args.parent}:{})});
    db.prepare("UPDATE optbot_workers SET worker=?,status='active' WHERE key=?").run(worker.id,args.key);
    if(db.prepare("SELECT key FROM optbot_worker_cancellations WHERE key=?").get(args.key)){await stop(worker.id);throw new Error("Worker request was cancelled");}
    if(closed){await bb.sdk.threads.stop({threadId:worker.id});throw new Error("OptBot workers are shutting down");}
@@ -178,14 +178,15 @@ export function createBbWorkers(bb:BbPluginApi,options:{retryDelays?:readonly nu
   if(row.parent!==parent||row.bot!==bot)throw new Error("Worker key does not belong to this conversation");
   if(row.worker)await stop(row.worker);
  }
- async function execute(raw:z.infer<typeof workerInput>,parent:string,bot:string) {
+ // A side chat's worker belongs to the side chat alone: no bot, and no bot tools (role "side").
+ async function execute(raw:z.infer<typeof workerInput>,parent:string,bot:string|null,role:"master"|"side"="master") {
   if(raw.action==="start") {
    if(!raw.key||!raw.model||raw.prompt===undefined)throw new Error("Worker start requires key, model and prompt");
    const {model,reasoningLevel,serviceTier}=raw;
    const thread=await read(()=>bb.sdk.threads.get({threadId:parent}));
    if(!thread.environmentId)throw new Error("Parent conversation has no execution environment");
    return start({key:raw.key,model,prompt:raw.prompt,instructions:raw.instructions??"",// OptBot always runs workers with Full access, whatever the model (user decision).
-   permissionMode:raw.permissionMode==="plan"?"plan":"full",...(reasoningLevel?{reasoningLevel}:{}),...(serviceTier?{serviceTier}:{}),parent,bot,projectId:thread.projectId,environment:{type:"reuse",environmentId:thread.environmentId},role:"master"});
+   permissionMode:raw.permissionMode==="plan"?"plan":"full",...(reasoningLevel?{reasoningLevel}:{}),...(serviceTier?{serviceTier}:{}),parent,bot,projectId:thread.projectId,environment:{type:"reuse",environmentId:thread.environmentId},role});
   }
   if(raw.action==="stop"&&raw.key){await cancelKey(raw.key,parent,bot);return {};}
   const row=raw.workerId?find(raw.workerId):undefined;

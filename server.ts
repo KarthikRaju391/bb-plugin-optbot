@@ -14,7 +14,8 @@ import { botProjectContext } from "./lib/project-context";
 import { BOT_GUIDANCE, botInstructions } from "./lib/bot-instructions";
 import { MEMORY_MAX_CHARS, validateMemory } from "./lib/memory-limit";
 import { registerOptChat } from "./lib/optchat-plugin";
-import { createBbWorkers, nativeEvents, workerInput } from "./lib/bb-workers";
+import { createBbWorkers, nativeEvents, retryReads, workerInput } from "./lib/bb-workers";
+import { isSideChat, sideContext, sideInput, SIDE_TOOL_DESCRIPTION } from "./lib/side-chat";
 import { scheduleResume } from "./lib/resume";
 import { createAgents, spawnInput, tellInput, SPAWN_DESCRIPTION, TELL_DESCRIPTION } from "./lib/agents";
 import { bbModelRef } from "./runtime/bb";
@@ -67,6 +68,8 @@ export default async function plugin(bb: BbPluginApi) {
       const explicit = store.owner(current);
       if (explicit) { botId = explicit; break; }
       const thread = await bb.sdk.threads.get({ threadId: current });
+      // A side chat is BB's (or, forked from a bot conversation, a memoryless side session): it inherits no bot.
+      if (isSideChat(thread)) break;
       chain.push(current);
       botId = (thread.parentThreadId && store.owner(thread.parentThreadId)) || (thread.sourceThreadId && store.owner(thread.sourceThreadId)) || null;
       if (botId) break;
@@ -136,6 +139,8 @@ export default async function plugin(bb: BbPluginApi) {
   async function routeNewThread(thread: RoutingThread, atCreation: boolean) {
     const existing = store.owner(thread.id);
     if (existing) return existing;
+    // Side chats stay BB's: neither the source's bot nor the project's default bot claims them.
+    if (isSideChat(thread)) return null;
     // Our creation request carries a durable explicit choice. A fire-and-forget
     // creation event must not let the project default claim it before dispatch.
     if (atCreation && thread.originPluginId === bb.pluginId) return null;
@@ -241,6 +246,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (worker) return { tools: worker.role === "master" ? ["optbot_read_state", "optbot_update_state", "optbot_memory", "optbot_spawn", "optbot_tell"] : [], skills: [] };
     // An agent's thread: its row may not exist yet on the first configure, so the spawn's metadata counts too.
     if (typeof ctx.pluginMetadata.optbotAgent === "string" || subagents.isAgent(ctx.thread.id)) return { tools: ["optbot_memory"], skills: [] };
+    // An OptBot side session only needs to run its native worker and read the main conversation.
+    if (ctx.provider.id === "optbot" && ctx.origin.kind === "fork" && !store.owner(ctx.thread.id)) return { tools: ["optbot_worker", "optbot_side"], skills: [] };
     const botId = contextOwner(ctx);
     const bot = botId ? store.get(botId) : null;
     return bot && ctx.provider.id === "optbot" ? { tools: ["optbot_read_state", "optbot_update_state", "optbot_chat", "optbot_memory", "optbot_worker"], skills: [], instructions: botInstructions(bot, botProjectContext(bot, ctx.project, store)) } : { tools: [], skills: [] };
@@ -250,9 +257,22 @@ export default async function plugin(bb: BbPluginApi) {
     async execute(input,ctx) {
       const thread = await bb.sdk.threads.get({threadId:ctx.threadId});
       if (thread.providerId !== "optbot") throw new Error("Only the OptBot orchestration bridge can manage workers");
+      if (isSideChat(thread) && !store.owner(thread.id)) return JSON.stringify(await workers.execute(input, ctx.threadId, null, "side"));
       const bot = await resolveOwner(ctx.threadId);
       if (!bot) throw new Error("Conversation is not assigned to an OptBot");
       return JSON.stringify(await workers.execute(input,ctx.threadId,bot));
+    },
+  });
+  bb.agents.registerTool({
+    name: "optbot_side", description: SIDE_TOOL_DESCRIPTION, parameters: sideInput,
+    async execute(_input, ctx) {
+      const thread = await retryReads(() => bb.sdk.threads.get({ threadId: ctx.threadId }));
+      if (thread.providerId !== "optbot" || !isSideChat(thread) || !thread.sourceThreadId || store.owner(thread.id)) throw new Error("Only an OptBot side chat reads side-chat context");
+      const [source, side] = await Promise.all([
+        retryReads(() => bb.sdk.threads.timeline({ threadId: thread.sourceThreadId! })),
+        retryReads(() => bb.sdk.threads.timeline({ threadId: thread.id })),
+      ]);
+      return JSON.stringify({ text: sideContext(source.rows, thread.createdAt, side.rows.filter((row) => row.threadId === thread.id)) });
     },
   });
   bb.agents.registerTool({ name: "optbot_spawn", description: SPAWN_DESCRIPTION, parameters: spawnInput, execute: (input, ctx) => subagents.spawn(ctx.threadId, input) });

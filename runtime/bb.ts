@@ -14,7 +14,9 @@ export const STEER_QUIET_MS=8_000;
 /** A worker poll goes through BB's server: 250 ms while the worker produces events, up to 2 s while it is quiet. */
 export const POLL_MIN_MS=250, POLL_MAX_MS=2_000;
 const WORKER_NOTE="You run in a hidden worker thread that nobody watches. Never use interactive question or approval tools such as AskUserQuestion; when you need the user's decision, end your turn and ask in your reply. This thread is closed when your turn ends, which stops anything still running in it: for subagents use optbot_spawn and optbot_tell, which run in their own threads and report back to you, never your built-in agent, task or delegation tools.";
-export function bbWorkerModel(call:WorkerCall):ModelBoundary {
+// A side chat's worker is a plain native session: no OptChat system prompt, and no bot tools to point it to.
+export const SIDE_WORKER_NOTE="You answer in a side chat the user follows in a side panel of their conversation. You run in a hidden thread: never use interactive question or approval tools such as AskUserQuestion; when you need the user's decision, end your turn and ask in your reply. This thread is closed when your turn ends, which stops anything still running in it.";
+export function bbWorkerModel(call:WorkerCall,preamble:{system:string;note:string}={system:SYSTEM,note:WORKER_NOTE}):ModelBoundary {
  let open:NonNullable<WorkerPage["open"]>=[];
  return {
   unanswered:()=>open,
@@ -27,7 +29,7 @@ export function bbWorkerModel(call:WorkerCall):ModelBoundary {
     if(options.signal.aborted)abort();else options.signal.addEventListener("abort",abort,{once:true});
    });
    try {
-    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:[SYSTEM,WORKER_NOTE,options.instructions].filter(Boolean).join("\n\n"),permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
+    ({workerId}=await call({action:"start",key,model:options.model,prompt,instructions:[preamble.system,preamble.note,options.instructions].filter(Boolean).join("\n\n"),permissionMode:options.permissionMode,...(options.reasoningLevel?{reasoningLevel:options.reasoningLevel}:{}),...(options.serviceTier?{serviceTier:options.serviceTier}:{})}) as {workerId:string});
     for(;;) {
      options.signal.throwIfAborted();
      const incoming=options.incoming?.()??[];

@@ -8,13 +8,13 @@ import {join} from "node:path";
 import { z } from "zod";
 import {
   experimental_defineProviderBridge, createBridgeIo, bridgeRequestEnvelopeSchema,
-  initializeParamsSchema, modelListParamsSchema, threadStartParamsSchema, threadResumeParamsSchema,
+  initializeParamsSchema, modelListParamsSchema, threadStartParamsSchema, threadResumeParamsSchema, threadForkParamsSchema,
   turnStartParamsSchema, turnSteerParamsSchema, threadStopParamsSchema, threadDeltaSchema,
   decodeToolCallResponsePayload, sanitizeInheritedChildProcessEnv, BRIDGE_JSON_RPC_ERRORS,
   type ThreadDelta,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { apiModel } from "./runtime/models";
-import { bbWorkerModel } from "./runtime/bb";
+import { bbWorkerModel, SIDE_WORKER_NOTE } from "./runtime/bb";
 import { cachedCatalog, type Catalog } from "./runtime/bb-catalog";
 import { workspaceTools } from "./runtime/workspace";
 import { runOptChatTurn, UserStop, type ModelBoundary, type ModelEvent, type ModelOptions } from "./runtime/turn";
@@ -46,7 +46,10 @@ function describeInput(blocks: readonly InputBlock[]) {
 export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line: string) => void; toolTimeoutMs?: number; catalog?: () => Promise<Catalog> } = {}) {
   const catalog = deps.catalog ?? cachedCatalog();
   const io = createBridgeIo<unknown>({ write: deps.write });
-  const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string; acknowledged?: boolean }>();
+  // A side session is a fork of an OptBot conversation (BB's side chat): its turns run on a native worker with the
+  // conversation's recent messages as context, and never read or write the bot's memory.
+  const sessions = new Map<string, z.infer<typeof threadStartParamsSchema> & { providerThreadId: string; acknowledged?: boolean; side?: boolean }>();
+  const SIDE_PREFIX = "optbot-side:";
   type State={controller:AbortController;released:boolean;requestId:string;providerTurnId?:string;model:string;permissionMode:ModelOptions["permissionMode"];promptMode?:"plan";incoming:Incoming[];closing?:boolean;closed?:boolean;received:Map<string,string>};
   const active = new Map<string, State>();
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -92,6 +95,24 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     if (result.isError) throw new Error(result.content);
     return JSON.parse(result.content) as unknown;
   }
+  function workerCall(threadId: string, providerTurnId: string) {
+    return async (input: Record<string, unknown>) => {
+      const result = decodeToolCallResponsePayload(await callRetrying(threadId, "optbot_worker", input, providerTurnId, input.action !== "steer"));
+      if (result.isError) throw new Error(result.content);
+      return JSON.parse(result.content);
+    };
+  }
+  // One side-chat turn: BB's timelines give the context (optbot_side), a fresh native worker answers.
+  async function runSide(params: z.infer<typeof turnStartParamsSchema>, options: ModelOptions, providerTurnId: string, onEvent: (event: ModelEvent) => void) {
+    const context = decodeToolCallResponsePayload(await callRetrying(params.threadId, "optbot_side", { action: "context" }, providerTurnId, true));
+    if (context.isError) throw new Error(context.content);
+    const prompt = `${(JSON.parse(context.content) as { text: string }).text}\n\n---\n\nThe user's message in the side chat:\n\n${describeInput(params.input)}`;
+    const worker = deps.model ?? bbWorkerModel(workerCall(params.threadId, providerTurnId), { system: "", note: SIDE_WORKER_NOTE });
+    for await (const event of worker.stream(prompt, options)) {
+      if (event.kind === "result") { if (!event.success) throw new Error(event.text || "The side chat's worker failed"); continue; }
+      onEvent(event);
+    }
+  }
   async function run(params: z.infer<typeof turnStartParamsSchema>, state: State) {
     const session = sessions.get(params.threadId)!;
     const providerTurnId = randomUUID();
@@ -104,7 +125,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
     delta(params.threadId, [{ kind: "input.accepted", clientRequestId: params.clientRequestId, providerTurnId }]);
     // Once per bridge: steers an older bridge left "pending" (taken, never acknowledged) are acknowledged in this open
     // turn, in the background so the turn never waits on the lookup. Best effort: if the turn has ended, they stay.
-    if (!session.acknowledged) {
+    if (!session.side && !session.acknowledged) {
       session.acknowledged = true;
       void memory(params.threadId, { action: "unacknowledged" }, providerTurnId).then(stale => {
         const ids = (stale as string[]).filter(id => id !== params.clientRequestId);
@@ -132,6 +153,7 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       }
     };
     try {
+      if (session.side && !params.options.model?.startsWith("bb/")) throw new Error("A side chat runs on a native BB model: choose one in the composer");
       if (params.input.some((block) => block.type === "image")) throw new Error("OptBot currently supports text and local attachments; use a local image path instead of an inline/remote image");
       if (!params.options.model?.startsWith("bb/") && params.options.permissionMode !== "full") throw new Error("Direct API OptBot tools require explicit Full access; OptBot never silently escalates permissions. Choose a BB provider for native permissions");
       if (!params.options.model?.startsWith("bb/") && (params.options.serviceTier==="fast" || (params.options.reasoningLevel && params.options.reasoningLevel!=="medium"))) throw new Error("These execution controls require a native BB provider; direct API transports only support standard tier and medium reasoning.");
@@ -160,12 +182,9 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
           {name:"date",description:"The date and time of message id.",parameters:z.object({id:z.number().int().nonnegative()}).strict()}].map(entry=>({name:entry.name,description:entry.description,inputSchema:z.toJSONSchema(entry.parameters),execute:async(input:Record<string,unknown>)=>{const parsed=entry.parameters.parse(input);const value=await memory(params.threadId,{action:entry.name,start:parsed.id,...("n" in parsed?{count:parsed.n}:{}),...("at" in parsed&&parsed.at!==undefined?{at:parsed.at}:{})},providerTurnId);return {content:[{type:"text" as const,text:String(value)}]};}}));
         options.tools=[...new Map([...workspaceTools(options),...options.tools,...navigation].map(tool=>[tool.name,tool])).values()];
       }
-      await runOptChatTurn({
-        call: (input) => memory(params.threadId, input, providerTurnId), model: !deps.model && options.model.startsWith("bb/") ? bbWorkerModel(async(input)=>{
-          const result=decodeToolCallResponsePayload(await callRetrying(params.threadId,"optbot_worker",input,providerTurnId,input.action!=="steer"));
-          if(result.isError)throw new Error(result.content);
-          return JSON.parse(result.content);
-        }) : model,
+      if (session.side) await runSide(params, options, providerTurnId, onEvent);
+      else await runOptChatTurn({
+        call: (input) => memory(params.threadId, input, providerTurnId), model: !deps.model && options.model.startsWith("bb/") ? bbWorkerModel(workerCall(params.threadId, providerTurnId)) : model,
         requestId: params.clientRequestId,
         background: !deps.model,
         input: describeInput(params.input),
@@ -193,7 +212,8 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
       if (req.method === "initialize") {
         const params = initializeParamsSchema.parse(req.params);
         if (params.protocolVersion !== 2) throw new Error("OptBot requires provider bridge protocol 2");
-        io.sendResult(req.id, { protocolVersion: 2, capabilities: { sessionRestore: true, fork: "none", grammarVersions: [2, 3], approvalEnforcedBy: "provider", steerMode: "inject", skills: { configure: false } } });
+        // "tip": BB forks an OptBot conversation (its side chat) at its latest message, as a side session.
+        io.sendResult(req.id, { protocolVersion: 2, capabilities: { sessionRestore: true, fork: "tip", grammarVersions: [2, 3], approvalEnforcedBy: "provider", steerMode: "inject", skills: { configure: false } } });
         void catalog().catch(() => {}); // warm: building it queries every installed provider
       } else if (req.method === "model/list") {
         modelListParamsSchema.parse(req.params);
@@ -207,7 +227,15 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         const params = req.method === "thread/start" ? threadStartParamsSchema.parse(req.params) : threadResumeParamsSchema.parse(req.params);
         if (active.has(params.threadId)) throw new Error("Cannot reconstruct an active OptBot conversation");
         const providerThreadId = "providerThreadId" in params ? params.providerThreadId as string : `optbot:${params.threadId}`;
-        sessions.set(params.threadId, { ...params, providerThreadId });
+        sessions.set(params.threadId, { ...params, providerThreadId, side: providerThreadId.startsWith(SIDE_PREFIX) });
+        notify("thread/identity", { threadId: params.threadId, providerThreadId });
+        delta(params.threadId, [{ kind: "session.reset" }]);
+        io.sendResult(req.id, { providerThreadId });
+      } else if (req.method === "thread/fork") {
+        const params = threadForkParamsSchema.parse(req.params);
+        if (active.has(params.threadId)) throw new Error("Cannot fork into an active OptBot conversation");
+        const providerThreadId = `${SIDE_PREFIX}${params.threadId}`;
+        sessions.set(params.threadId, { ...params, providerThreadId, side: true });
         notify("thread/identity", { threadId: params.threadId, providerThreadId });
         delta(params.threadId, [{ kind: "session.reset" }]);
         io.sendResult(req.id, { providerThreadId });
@@ -237,7 +265,8 @@ export function createOptBotBridge(deps: { model?: ModelBoundary; write?: (line:
         if(prior!==undefined&&prior!==text)throw new Error("A client request ID cannot be reused with different input");
         if(prior!==undefined&&ended())throw new NoActiveTurn("The OptBot turn ended while this message arrived; it starts the next turn");
         if(prior===undefined){
-          await memory(params.threadId,{action:"enqueue",requestId:params.clientRequestId,parentId:turn.requestId,text},params.expectedTurnId);
+          // A side session keeps nothing in the bot's memory: the message goes straight to its worker.
+          if(!session.side)await memory(params.threadId,{action:"enqueue",requestId:params.clientRequestId,parentId:turn.requestId,text},params.expectedTurnId);
           turn.received.set(params.clientRequestId,text);
           if(ended())throw new NoActiveTurn("The OptBot turn ended while this message arrived; it starts the next turn");
           turn.incoming.push({id:params.clientRequestId,text,notice:NOTICE.test(text)});
