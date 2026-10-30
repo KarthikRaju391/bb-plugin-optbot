@@ -24,6 +24,13 @@ async function create(host: Awaited<ReturnType<typeof backend>>, fork: ReturnTyp
 }
 const configure = (host: Awaited<ReturnType<typeof backend>>, threadId: string, provider: string) => host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ provider: { id: provider }, thread: { id: threadId }, project: { id: "project" }, origin: { kind: "fork", pluginId: "side-chat" } }));
 
+it("declares fork support to BB, which refuses a side chat for a provider without it", async () => {
+  const host = await setup();
+  const provider = host.harness.inspection.registrations.providerRegistrations.find((entry) => entry.id === "optbot");
+  // BB's thread-fork check reads the registered declaration (supportsFork = capabilities.fork !== "none").
+  expect(provider?.capabilities.fork).toBe("tip");
+});
+
 it("leaves a side chat of a normal thread to BB, even in a project whose default bot claims new threads", async () => {
   const host = await setup();
   await host.harness.behavior.callRpc("bot_create", { name: "Owner", role: "Research", hostId: "host-home", avatar: { color: "#168b75", shape: "round", expression: "curious", motion: "still" }, sectionId: null, linkedProjectIds: ["project"], ownedProjectIds: ["project"], soul: "You are Owner." });

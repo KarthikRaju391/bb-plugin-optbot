@@ -95,7 +95,7 @@ export async function registerOptChat(bb: BbPluginApi, resolveOwner: (threadId: 
     // No Plan action: turns run as BB worker threads, which do not support Plan mode.
     composerActions: [],
     strings: { signInHint: "Use an installed BB provider with its existing authentication.", expiredHint: "Renew the selected BB provider's authentication.", installUrl: "https://getbb.app", brandPrefix: "OptBot " },
-    capabilities: { supportsServiceTier: true, supportsNativeUserQuestion: false, fork: "none", supportsManualCompaction: false, supportsThreadArchive: false, supportsThreadRename: false, permissionModes: ["full"], reasoningLevels: ["none", "low", "medium", "high", "xhigh", "ultracode", "max", "ultra"] },
+    capabilities: { supportsServiceTier: true, supportsNativeUserQuestion: false, fork: "tip", supportsManualCompaction: false, supportsThreadArchive: false, supportsThreadRename: false, permissionModes: ["full"], reasoningLevels: ["none", "low", "medium", "high", "xhigh", "ultracode", "max", "ultra"] },
     models: { scope: "host" },
   });
   const chatSchema = z.object({
