@@ -102,7 +102,10 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
   if (!viewColumns.includes("seen_batch")) db.exec("ALTER TABLE optchat_view ADD COLUMN seen_batch INTEGER NOT NULL DEFAULT 0");
   /** How many unbuilt messages ahead a compaction may start (UniiChat Memory.JOBS: its window, by message). */
   const WINDOW = 64;
-  const count = (bot: string) => (db.prepare("SELECT COUNT(*) AS n FROM optchat_log WHERE bot_id=?").get(bot) as { n: number }).n;
+  // Messages are numbered 0..n-1 without gaps (the archive refuses a gap; append takes the next number), so the count is
+  // the highest number + 1: one index lookup. COUNT(*) walks every message and took ~1 s for a 21,643-message bot on a
+  // loaded live server, on every hydrate (each second per bot) and every memory call.
+  const count = (bot: string) => (db.prepare("SELECT COALESCE(MAX(idx)+1,0) AS n FROM optchat_log WHERE bot_id=?").get(bot) as { n: number }).n;
   const entry = (bot: string, idx: number) => db.prepare("SELECT idx,kind,text,date,thread_id AS threadId FROM optchat_log WHERE bot_id=? AND idx=?").get(bot, idx) as Entry | undefined;
   const node = (bot: string, part: Part) => (db.prepare("SELECT text FROM optchat_nodes WHERE bot_id=? AND start=? AND count=?").get(bot, part.start, part.count) as { text: string } | undefined)?.text;
   const parts = (bot: string): Part[] => JSON.parse((db.prepare("SELECT parts FROM optchat_view WHERE bot_id=?").get(bot) as { parts: string } | undefined)?.parts ?? "[]");
@@ -171,9 +174,15 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     return q;
   }
   const loaded = new Set<string>();
+  // The archive's node count when SQLite was last confirmed to hold exactly those nodes: until the archive changes,
+  // nothing needs counting again.
+  const verifiedNodes = new Map<string, number>();
   function saveNode(bot: string, start: number, size: number, text: string) {
+    const before = options.archive?.load(bot).tree.size;
     options.archive?.appendTree(bot, { l: Math.log2(size), i: start/size, text, size: bytes(text) });
     db.prepare("INSERT INTO optchat_nodes VALUES (?,?,?,?)").run(bot,start,size,text);
+    // Both sides gained this node: what was confirmed stays confirmed.
+    if (before !== undefined && verifiedNodes.get(bot) === before) verifiedNodes.set(bot, options.archive!.load(bot).tree.size);
     const q = queues.get(bot), part = { start, count: size };
     if (q) { if (size === 1) { const at = q.leaves.indexOf(start); if (at >= 0) q.leaves.splice(at, 1); } q.merges.delete(label(part)); }
     // Its parent is ready once both halves are built (UniiChat Memory.store).
@@ -183,13 +192,17 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     if (node(bot, other) !== undefined) q.merges.set(label(parent), parent);
   }
   // One transaction: importing a cold cache row by row would fsync every insert.
+  const nodeCount = (bot: string) => (db.prepare("SELECT COUNT(*) AS n FROM optchat_nodes WHERE bot_id=?").get(bot) as { n: number }).n;
   function hydrate(bot: string) { db.transaction(() => hydrateNow(bot))(); }
   function hydrateNow(bot: string) {
     if (!options.archive) return;
     const data = options.archive.load(bot);
     if(loaded.has(bot)) {
-      const cachedNodes=(db.prepare("SELECT COUNT(*) AS n FROM optchat_nodes WHERE bot_id=?").get(bot) as {n:number}).n;
-      if(count(bot)===data.main.length&&cachedNodes===data.tree.size)return;
+      if(count(bot)===data.main.length) {
+        if(verifiedNodes.get(bot)===data.tree.size)return;
+        // The archive gained nodes this instance did not write (another instance sharing it): count once.
+        if(nodeCount(bot)===data.tree.size){verifiedNodes.set(bot,data.tree.size);return;}
+      }
       loaded.delete(bot);
     }
     // One-time import of this checkout's earlier SQLite implementation only.
@@ -203,6 +216,8 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       if (!old) db.prepare("INSERT INTO optchat_log VALUES (?,?,?,?,?,?,?)").run(bot,line.i,line.eventKey ?? `import:${line.i}`,line.kind,line.text,line.date,line.threadId ?? "");
     }
     if (cached.length > data.main.length) throw new Error("Canonical OptChat history is incomplete");
+    // count() relies on gapless numbering; check it here, where the whole log is read anyway.
+    if (count(bot) !== (db.prepare("SELECT COUNT(*) AS n FROM optchat_log WHERE bot_id=?").get(bot) as { n: number }).n) throw new Error("OptChat SQLite cache has a message numbering gap; restore its backup");
     const cachedNodes = db.prepare("SELECT start,count,text FROM optchat_nodes WHERE bot_id=?").all(bot) as (Part & { text: string })[];
     const stored = new Map(cachedNodes.map(row => [label(row), row.text]));
     if (!data.tree.size) for (const line of cachedNodes) options.archive.appendTree(bot,{ l: Math.log2(line.count), i: line.start/line.count, text: line.text, size: bytes(line.text) });
@@ -225,10 +240,16 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
     if (!valid(state.seen.parts)) state.seen = { parts: state.view.parts.map(part => ({ ...part })), batch: false };
     saveState(bot, state);
     refit(bot, false);
+    if (nodeCount(bot) === data.tree.size) verifiedNodes.set(bot, data.tree.size); else verifiedNodes.delete(bot);
     loaded.add(bot);
   }
   function partBytes(part: Part, text: (part: Part) => string | undefined) { return bytes(text(part) ?? "(not summarized yet: zoom it)"); }
   const temporaryInbox=new Map<string,Map<string,Receipt>>();
+  // recoverQueued's progress per bot, so a pass costs the receipts still open, not the whole inbox. The inbox only grows
+  // (receipts are appended and never change), and the log only grows, so a receipt found in permanent memory for its own
+  // conversation stays there and leaves `open` for good. `first` keeps each parent's first-seen position, which orders
+  // recovery exactly as a scan of the whole inbox would. Kept for one inbox object; a different one starts over.
+  const recovery=new Map<string,{inbox:Map<string,Receipt>;seen:number;first:Map<string,number>;open:Receipt[]}>();
   function receipts(bot:string){if(options.archive)return options.archive.receipts(bot);let values=temporaryInbox.get(bot);if(!values)temporaryInbox.set(bot,values=new Map());return values;}
   function receive(bot:string,threadId:string,id:string,parentId:string,text:string){const value={id,parentId,threadId,text,date:new Date(now()).toISOString()};if(options.archive)return options.archive.receive(bot,value);const old=receipts(bot).get(id);if(old){if(old.text!==text||old.threadId!==threadId)throw new Error("Conflicting duplicate queued input");return old;}receipts(bot).set(id,value);return value;}
   // An input logged before reports became `work` stays as it was: the log is permanent, so a replay of its
@@ -372,7 +393,41 @@ export function createOptChat(db: Database.Database, options: { viewBytes?: numb
       const view=`<chat>\n${parts(bot).map(part=>`${label(part)}|${(node(bot,part)??"(not summarized yet: zoom it)").replace(/\r\n|\n|\r/g," ")}`).join("\n")}\n</chat>`;
       return {version:1 as const,botId:bot,main,tree,view,inbox:[...receipts(bot).values()]};
     },
-    recoverQueued(bot:string){const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());const parents=new Set([...receipts(bot).values()].map(row=>row.parentId));for(const id of parents){const run=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,id) as {status:string;expires:number}|undefined;if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))flushInbox(bot,id);}},
+    recoverQueued(bot:string) {
+      const running=db.prepare("SELECT 1 FROM optchat_runs WHERE bot_id=? AND status='active' AND expires>?").get(bot,now());
+      const logged=db.prepare("SELECT thread_id AS threadId FROM optchat_log WHERE bot_id=? AND event_key=?");
+      const inbox=receipts(bot);
+      let state=recovery.get(bot);
+      if(!state||state.inbox!==inbox)recovery.set(bot,state={inbox,seen:0,first:new Map(),open:[]});
+      if(inbox.size>state.seen) {
+        let at=0;
+        for(const row of inbox.values()) {
+          if(at>=state.seen) {
+            if(!state.first.has(row.parentId))state.first.set(row.parentId,at);
+            state.open.push(row);
+          }
+          at++;
+        }
+        state.seen=at;
+      }
+      const open:Receipt[]=[], pending=new Map<string,Receipt[]>();
+      for(const row of state.open) {
+        const old=logged.get(bot,`${row.id}:input`) as {threadId:string}|undefined;
+        if(old?.threadId===row.threadId)continue;
+        open.push(row);
+        let group=pending.get(row.parentId);
+        if(!group)pending.set(row.parentId,group=[]);
+        group.push(row);
+      }
+      state.open=open;
+      const order=[...pending.keys()].sort((a,b)=>state.first.get(a)!-state.first.get(b)!);
+      const status=db.prepare("SELECT status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?");
+      for(const id of order) {
+        const run=status.get(bot,id) as {status:string;expires:number}|undefined;
+        if((!run&&!running)||(run&&(run.status!=="active"||run.expires<=now())))
+          for(const row of pending.get(id)!)appendInput(bot,row.threadId,`${row.id}:input`,row.text,row.date);
+      }
+    },
     enqueue(bot:string,threadId:string,id:string,parentId:string,text:string){const run=db.prepare("SELECT thread_id AS threadId,status,expires FROM optchat_runs WHERE bot_id=? AND request_id=?").get(bot,parentId) as {threadId:string;status:string;expires:number}|undefined;
       // A turn that has not begun yet (its begin still waiting, e.g. on another conversation's turn) takes the message too:
       // the receipt waits for it, and recoverQueued logs it if that turn never begins (live: a second subagent report
